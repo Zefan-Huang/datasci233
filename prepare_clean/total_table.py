@@ -5,10 +5,12 @@
 - 根据临床字段构建 OS/复发相关标签字段。
 
 输入：
-- data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv
+- output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv（优先）
+- data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv（回退）
 - data/manifest-1622561851074/metadata.csv
 - data/AIM_files_updated-11-10-2020/*.xml
-- data/GSE103584_series_matrix.txt
+- output/clean_data/GSE103584_series_matrix.txt（优先）
+- data/GSE103584_series_matrix.txt（回退）
 
 输出：
 - output/patient_manifest.csv
@@ -24,10 +26,13 @@ from pathlib import Path
 
 
 DATA_DIR = Path("data")
-CLINICAL_CSV = DATA_DIR / "NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv"
+OUTPUT_CLEAN_DIR = Path("output") / "clean_data"
+PRIMARY_CLINICAL_CSV = OUTPUT_CLEAN_DIR / "NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv"
+LEGACY_CLINICAL_CSV = DATA_DIR / "NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv"
 METADATA_CSV = DATA_DIR / "manifest-1622561851074" / "metadata.csv"
 AIM_DIR = DATA_DIR / "AIM_files_updated-11-10-2020"
-SERIES_MATRIX_TXT = DATA_DIR / "GSE103584_series_matrix.txt"
+PRIMARY_SERIES_MATRIX_TXT = OUTPUT_CLEAN_DIR / "GSE103584_series_matrix.txt"
+LEGACY_SERIES_MATRIX_TXT = DATA_DIR / "GSE103584_series_matrix.txt"
 OUTPUT_CSV = Path("output") / "patient_manifest.csv"
 
 MISSING_STRINGS = {"", "n/a", "na", "not collected", "not recorded in database", "null",}
@@ -46,6 +51,22 @@ def normalize_missing(value):
     if cleaned.lower() in MISSING_STRINGS:
         return ""
     return cleaned
+
+
+def resolve_input_path(primary_path, fallback_path, label):
+    """Why: 当前项目有 output/data 两套目录，需要稳定选择可用输入文件。
+
+    Content: 优先使用 primary_path；不存在时回退 fallback_path；都不存在则报错。
+    Input: primary_path、fallback_path、label。
+    Output: 可读取的 Path。
+    """
+    if primary_path.exists():
+        return primary_path
+    if fallback_path.exists():
+        return fallback_path
+    raise FileNotFoundError(
+        f"{label} not found in either '{primary_path}' or '{fallback_path}'"
+    )
 
 
 def parse_date(value):
@@ -128,18 +149,18 @@ def load_aim_cases():
     return out
 
 
-def load_rna_mapping():
+def load_rna_mapping(series_matrix_path):
     """Why: 多模态训练需要把 RNA 样本（GSM）映射到病例 ID。
 
     Content: 从 series_matrix 的标题行和 GEO accession 行提取映射。
-    Input: SERIES_MATRIX_TXT。
+    Input: series_matrix_path。
     Output: case_id 到 gsm_id 的映射字典。
     """
     case_to_gsm = {}
     sample_titles = None
     sample_geo = None
 
-    with SERIES_MATRIX_TXT.open(encoding="utf-8") as f:
+    with series_matrix_path.open(encoding="utf-8") as f:
         for line in f:
             if line.startswith("!Sample_title\t"):
                 sample_titles = [x.strip().strip('"') for x in line.rstrip("\n").split("\t")[1:]]
@@ -157,19 +178,19 @@ def load_rna_mapping():
     return case_to_gsm
 
 
-def build_patient_manifest():
+def build_patient_manifest(clinical_csv_path, series_matrix_path):
     """Why: 训练前需要一张病人级总表，把标签和模态状态放在一起。
 
     Content: 合并临床、影像模态、AIM、RNA 映射，生成每病人一行的 manifest。
-    Input: CLINICAL_CSV + METADATA_CSV + AIM_DIR + SERIES_MATRIX_TXT。
+    Input: clinical_csv_path + METADATA_CSV + AIM_DIR + series_matrix_path。
     Output: 排序后的 manifest 行列表（字典列表）。
     """
     modality_flags = load_modality_flags()
     aim_cases = load_aim_cases()
-    case_to_gsm = load_rna_mapping()
+    case_to_gsm = load_rna_mapping(series_matrix_path)
 
     output_rows = []
-    with CLINICAL_CSV.open(encoding="utf-8-sig", newline="") as f:
+    with clinical_csv_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
             patient_id = row["Case ID"].strip()
@@ -307,7 +328,19 @@ def main():
     Input: 无（使用模块常量指定的数据路径）。
     Output: 生成 patient_manifest.csv，并输出统计信息。
     """
-    rows = build_patient_manifest()
+    clinical_csv_path = resolve_input_path(
+        PRIMARY_CLINICAL_CSV,
+        LEGACY_CLINICAL_CSV,
+        "clinical csv",
+    )
+    series_matrix_path = resolve_input_path(
+        PRIMARY_SERIES_MATRIX_TXT,
+        LEGACY_SERIES_MATRIX_TXT,
+        "series matrix",
+    )
+    print(f"using_clinical_csv: {clinical_csv_path}")
+    print(f"using_series_matrix: {series_matrix_path}")
+    rows = build_patient_manifest(clinical_csv_path, series_matrix_path)
     write_manifest(rows)
     print_summary(rows)
 

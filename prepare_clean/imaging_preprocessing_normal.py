@@ -4,7 +4,7 @@
 - 用于在 PyCharm pydevconsole 环境运行时，忽略 IDE 自动注入的未知参数。
 
 输入：
-- 可选参数 --max-cases N
+- 可选参数 --max-cases N（默认 0，表示全量）
 - 其他未知参数会被自动忽略（例如 --mode/--host/--port）
 
 输出：
@@ -23,7 +23,12 @@ def parse_args():
     Output: argparse 参数对象（包含 max_cases）。
     """
     parser = argparse.ArgumentParser(description="Run imaging preprocessing (pydevconsole-safe).")
-    parser.add_argument("--max-cases", type=int, default=None, help="Only process first N patients.")
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        help="0 means process all patients; >0 means process first N patients.",
+    )
     args, _unknown = parser.parse_known_args()
     return args
 

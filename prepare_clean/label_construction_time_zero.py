@@ -6,7 +6,8 @@
 - 构建复发标签（event_rec, time_rec_days, rec_location_class）。
 
 输入：
-- data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv
+- output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv（优先）
+- data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv（回退）
 
 输出：
 - output/labels_time_zero.csv
@@ -19,7 +20,8 @@ from datetime import datetime, date
 from pathlib import Path
 
 
-INPUT_CLINICAL = Path("data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
+PRIMARY_INPUT_CLINICAL = Path("output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
+LEGACY_INPUT_CLINICAL = Path("data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
 OUTPUT_LABELS = Path("output/labels_time_zero.csv")
 
 MISSING = {"", "n/a", "na", "not collected", "not recorded in database", "null"}
@@ -36,6 +38,22 @@ def clean(value):
         return ""
     text = value.strip()
     return "" if text.lower() in MISSING else text
+
+
+def resolve_input_path(primary_path, fallback_path, label):
+    """Why: 兼容 output/data 两种目录布局，避免路径迁移后脚本失效。
+
+    Content: 优先用 primary_path；不存在时回退 fallback_path；都不存在则报错。
+    Input: primary_path、fallback_path、label。
+    Output: 可读取的 Path。
+    """
+    if primary_path.exists():
+        return primary_path
+    if fallback_path.exists():
+        return fallback_path
+    raise FileNotFoundError(
+        f"{label} not found in either '{primary_path}' or '{fallback_path}'"
+    )
 
 
 def parse_date(value):
@@ -71,15 +89,15 @@ def day_diff(start, end):
     return d
 
 
-def build_rows():
+def build_rows(clinical_path):
     """Why: 把原始临床表转换成可直接训练的 time-zero 标签表。
 
     Content: 以 CT Date 作为 t0，构建 OS 与复发的 event/time/known 字段。
-    Input: data 目录下的临床 CSV（由常量 INPUT_CLINICAL 指定）。
+    Input: clinical_path（临床 CSV 路径）。
     Output: 标签行列表（每行是一个 patient 的字典）。
     """
     rows = []
-    with INPUT_CLINICAL.open(encoding="utf-8-sig", newline="") as f:
+    with clinical_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for r in reader:
             patient_id = r["Case ID"].strip()
@@ -185,7 +203,13 @@ def main():
     Input: 无（读取模块常量定义的输入文件）。
     Output: 生成标签 CSV，并在终端输出统计信息。
     """
-    rows = build_rows()
+    clinical_path = resolve_input_path(
+        PRIMARY_INPUT_CLINICAL,
+        LEGACY_INPUT_CLINICAL,
+        "clinical csv",
+    )
+    print(f"using_clinical_csv: {clinical_path}")
+    rows = build_rows(clinical_path)
     write_rows(rows)
     n = len(rows)
     print(f"wrote: {OUTPUT_LABELS}")

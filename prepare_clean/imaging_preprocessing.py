@@ -18,9 +18,6 @@
 - output/preprocessed/ct_norm/*.npz（依赖满足时）
 - output/preprocessed/seg_masks/*.npz（依赖满足时）
 """
-import numpy as np
-import pydicom as pydicom
-import scipy.ndimage as ndimage
 import argparse
 import csv
 import hashlib
@@ -29,6 +26,21 @@ import math
 import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import pydicom as pydicom
+except Exception:
+    pydicom = None
+
+try:
+    import scipy.ndimage as ndimage
+except Exception:
+    ndimage = None
 
 
 DATA_DIR = Path("data")
@@ -240,6 +252,103 @@ def find_aim_file(patient_id):
     return ""
 
 
+def normalize_vector(vec, np):
+    """Why: 几何对齐需要单位法向量，避免尺度影响切片匹配。
+
+    Content: 将 3D 向量归一化；零向量返回 None。
+    Input: vec（长度3），np。
+    Output: 归一化后的向量数组或 None。
+    """
+    arr = np.asarray(vec, dtype="float64")
+    norm = float(np.linalg.norm(arr))
+    if norm <= 0:
+        return None
+    return arr / norm
+
+
+def extract_segment_numbers(seg_ds):
+    """Why: DICOM-SEG 可能包含多个 segment，需优先定位肿瘤相关 segment。
+
+    Content: 读取 SegmentSequence；命中肿瘤关键词时仅返回肿瘤 segment，否则返回全部。
+    Input: seg_ds（SEG DICOM 数据集）。
+    Output: (selected_set, all_set)。
+    """
+    keywords = ("tumor", "tumour", "lesion", "gtv", "target", "mass", "nodule", "primary")
+    all_segments = set()
+    tumor_segments = set()
+    seg_seq = getattr(seg_ds, "SegmentSequence", [])
+    for seg in seg_seq:
+        seg_num = int(getattr(seg, "SegmentNumber", 0))
+        if seg_num <= 0:
+            continue
+        all_segments.add(seg_num)
+        text_parts = [
+            str(getattr(seg, "SegmentLabel", "")),
+            str(getattr(seg, "SegmentDescription", "")),
+        ]
+        for attr in ("SegmentedPropertyTypeCodeSequence", "AnatomicRegionSequence"):
+            code_seq = getattr(seg, attr, [])
+            for item in code_seq:
+                text_parts.append(str(getattr(item, "CodeMeaning", "")))
+                text_parts.append(str(getattr(item, "CodeValue", "")))
+        merged_text = " ".join(text_parts).lower()
+        if any(key in merged_text for key in keywords):
+            tumor_segments.add(seg_num)
+
+    if tumor_segments:
+        return tumor_segments, all_segments
+    return all_segments, all_segments
+
+
+def frame_segment_number(frame_fg):
+    """Why: 逐帧筛选 segment 时需要知道当前 frame 属于哪个 segment。
+
+    Content: 从 PerFrame Functional Group 中读取 ReferencedSegmentNumber。
+    Input: frame_fg（单帧 functional group）。
+    Output: segment number 整数或 None。
+    """
+    seg_ident = getattr(frame_fg, "SegmentIdentificationSequence", [])
+    if not seg_ident:
+        return None
+    return int(getattr(seg_ident[0], "ReferencedSegmentNumber", 0)) or None
+
+
+def frame_referenced_sop_uid(frame_fg):
+    """Why: 几何最可靠映射是 frame 引用的 CT SOP Instance UID。
+
+    Content: 从 DerivationImageSequence/SourceImageSequence 提取 ReferencedSOPInstanceUID。
+    Input: frame_fg。
+    Output: SOP UID 字符串或空字符串。
+    """
+    deriv = getattr(frame_fg, "DerivationImageSequence", [])
+    for deriv_item in deriv:
+        source_seq = getattr(deriv_item, "SourceImageSequence", [])
+        for source_item in source_seq:
+            sop_uid = str(getattr(source_item, "ReferencedSOPInstanceUID", "")).strip()
+            if sop_uid:
+                return sop_uid
+    return ""
+
+
+def frame_image_position(frame_fg):
+    """Why: 当没有 SOP 引用时，需要用 frame 的空间位置匹配 CT 切片。
+
+    Content: 从 PlanePositionSequence 中读取 ImagePositionPatient。
+    Input: frame_fg。
+    Output: 长度3浮点元组或 None。
+    """
+    plane_pos = getattr(frame_fg, "PlanePositionSequence", [])
+    if not plane_pos:
+        return None
+    ipp = getattr(plane_pos[0], "ImagePositionPatient", None)
+    if ipp is None or len(ipp) < 3:
+        return None
+    try:
+        return (float(ipp[0]), float(ipp[1]), float(ipp[2]))
+    except Exception:
+        return None
+
+
 def load_ct_volume_and_normalize(ct_series_dir, deps):
     """Why: 5.1 需要生成归一化 CT 体数据用于后续分割/特征提取。
 
@@ -269,20 +378,57 @@ def load_ct_volume_and_normalize(ct_series_dir, deps):
     if not slices:
         return {"status": "ct_not_found", "error": "no readable slice"}
 
-    def slice_sort_key(ds):
-        if hasattr(ds, "ImagePositionPatient"):
-            try:
-                return float(ds.ImagePositionPatient[2])
-            except Exception:
-                pass
-        if hasattr(ds, "InstanceNumber"):
-            try:
-                return float(ds.InstanceNumber)
-            except Exception:
-                pass
-        return 0.0
+    first_with_iop = None
+    for ds in slices:
+        iop = getattr(ds, "ImageOrientationPatient", None)
+        if iop is not None and len(iop) >= 6:
+            first_with_iop = ds
+            break
+    normal = None
+    if first_with_iop is not None:
+        row_dir = [float(first_with_iop.ImageOrientationPatient[i]) for i in range(3)]
+        col_dir = [float(first_with_iop.ImageOrientationPatient[i]) for i in range(3, 6)]
+        normal = normalize_vector(np.cross(row_dir, col_dir), np)
 
-    slices.sort(key=slice_sort_key)
+    ct_meta = []
+    for ds in slices:
+        ipp = None
+        ipp_raw = getattr(ds, "ImagePositionPatient", None)
+        if ipp_raw is not None and len(ipp_raw) >= 3:
+            try:
+                ipp = (float(ipp_raw[0]), float(ipp_raw[1]), float(ipp_raw[2]))
+            except Exception:
+                ipp = None
+        instance = getattr(ds, "InstanceNumber", None)
+        try:
+            instance = float(instance) if instance is not None else None
+        except Exception:
+            instance = None
+        sop_uid = str(getattr(ds, "SOPInstanceUID", "")).strip()
+        scalar = None
+        if ipp is not None and normal is not None:
+            scalar = float(np.dot(np.asarray(ipp, dtype="float64"), normal))
+        elif ipp is not None:
+            scalar = float(ipp[2])
+        ct_meta.append(
+            {
+                "ds": ds,
+                "ipp": ipp,
+                "instance": instance,
+                "sop_uid": sop_uid,
+                "scalar": scalar,
+            }
+        )
+
+    def slice_sort_key(item):
+        if item["scalar"] is not None:
+            return (0, float(item["scalar"]))
+        if item["instance"] is not None:
+            return (1, float(item["instance"]))
+        return (2, 0.0)
+
+    ct_meta.sort(key=slice_sort_key)
+    slices = [m["ds"] for m in ct_meta]
     hu_slices = []
     for ds in slices:
         px = ds.pixel_array.astype("float32")
@@ -300,10 +446,15 @@ def load_ct_volume_and_normalize(ct_series_dir, deps):
     row_spacing = float(pixel_spacing[0])
     col_spacing = float(pixel_spacing[1])
 
-    if len(slices) > 1 and hasattr(slices[0], "ImagePositionPatient") and hasattr(slices[1], "ImagePositionPatient"):
-        z0 = float(slices[0].ImagePositionPatient[2])
-        z1 = float(slices[1].ImagePositionPatient[2])
-        slice_spacing = abs(z1 - z0) if abs(z1 - z0) > 0 else float(getattr(first, "SliceThickness", 1.0))
+    scalar_values = [m["scalar"] for m in ct_meta if m["scalar"] is not None]
+    if len(scalar_values) > 1:
+        sorted_scalars = sorted(scalar_values)
+        diffs = [abs(sorted_scalars[i] - sorted_scalars[i - 1]) for i in range(1, len(sorted_scalars))]
+        diffs = [d for d in diffs if d > 1e-5]
+        if diffs:
+            slice_spacing = float(np.median(np.asarray(diffs, dtype="float64")))
+        else:
+            slice_spacing = float(getattr(first, "SliceThickness", 1.0))
     else:
         slice_spacing = float(getattr(first, "SliceThickness", 1.0))
 
@@ -318,6 +469,26 @@ def load_ct_volume_and_normalize(ct_series_dir, deps):
     normalized = (clipped - HU_CLIP[0]) / (HU_CLIP[1] - HU_CLIP[0])
     normalized = normalized.astype("float32")
 
+    sop_uid_to_index = {}
+    slice_scalars = []
+    for idx, meta in enumerate(ct_meta):
+        if meta["sop_uid"]:
+            sop_uid_to_index[meta["sop_uid"]] = idx
+        if meta["scalar"] is None:
+            slice_scalars.append(float(idx))
+        else:
+            slice_scalars.append(float(meta["scalar"]))
+
+    scalar_tolerance = max(float(slice_spacing) * 0.6, 1e-3)
+    ct_geometry = {
+        "normal": None if normal is None else [float(x) for x in normal.tolist()],
+        "slice_scalars": slice_scalars,
+        "sop_uid_to_index": sop_uid_to_index,
+        "rows": int(getattr(first, "Rows", volume.shape[1])),
+        "cols": int(getattr(first, "Columns", volume.shape[2])),
+        "scalar_tolerance": float(scalar_tolerance),
+    }
+
     return {
         "status": "ok",
         "volume_original": volume,
@@ -325,14 +496,15 @@ def load_ct_volume_and_normalize(ct_series_dir, deps):
         "volume_norm": normalized,
         "spacing_original": current_spacing,
         "spacing_target": TARGET_SPACING,
+        "ct_geometry": ct_geometry,
     }
 
 
-def load_tumor_mask(seg_series_dir, ct_shape, deps):
+def load_tumor_mask(seg_series_dir, ct_shape, ct_geometry, deps):
     """Why: 5.2 需要得到和 CT 对齐的肿瘤二值 mask。
 
-    Content: 读取 DICOM-SEG 像素，做基础形状对齐检查并生成二值 mask。
-    Input: seg_series_dir（SEG 目录），ct_shape（CT 体形状），deps。
+    Content: 读取 DICOM-SEG 全部文件，基于 SOP UID/空间几何严格对齐到 CT 体素。
+    Input: seg_series_dir（SEG 目录）、ct_shape、ct_geometry、deps。
     Output: 包含状态、mask、错误信息的字典。
     """
     if not deps["ready"]:
@@ -342,49 +514,182 @@ def load_tumor_mask(seg_series_dir, ct_shape, deps):
 
     np = deps["np"]
     pydicom = deps["pydicom"]
-    ndimage = deps["ndimage"]
     seg_files = sorted(seg_series_dir.glob("*.dcm"))
     if not seg_files:
         return {"status": "seg_not_found", "error": "no seg dcm file"}
 
-    try:
-        seg_ds = pydicom.dcmread(str(seg_files[0]), force=True)
-        arr = seg_ds.pixel_array
-    except Exception as exc:
-        return {"status": "seg_read_failed", "error": str(exc)}
+    ct_sop_to_index = ct_geometry.get("sop_uid_to_index", {})
+    ct_scalars = ct_geometry.get("slice_scalars", [])
+    ct_rows = int(ct_geometry.get("rows", ct_shape[1]))
+    ct_cols = int(ct_geometry.get("cols", ct_shape[2]))
+    ct_normal = ct_geometry.get("normal")
+    scalar_tolerance = float(ct_geometry.get("scalar_tolerance", 1.0))
+    if ct_normal is not None:
+        ct_normal = np.asarray(ct_normal, dtype="float64")
 
-    if arr.ndim == 4:
-        # Some SEG files store multiple segment channels; merge as one tumor mask.
-        arr = arr.max(axis=0)
-    if arr.ndim == 2:
-        arr = arr[np.newaxis, :, :]
-    elif arr.ndim != 3:
-        return {"status": "seg_shape_mismatch", "error": f"unsupported ndim={arr.ndim}"}
+    mask = np.zeros(ct_shape, dtype="uint8")
+    seg_dcm_count = 0
+    seg_instance_count = 0
+    seg_frame_count = 0
+    source_shape = None
+    seen_uid = set()
 
-    align_method = "direct"
-    source_shape = tuple(arr.shape)
-    if tuple(arr.shape) != tuple(ct_shape):
-        if min(arr.shape) <= 0:
-            return {"status": "seg_shape_mismatch", "error": f"invalid seg shape={arr.shape}"}
-        zoom_factors = (
-            ct_shape[0] / arr.shape[0],
-            ct_shape[1] / arr.shape[1],
-            ct_shape[2] / arr.shape[2],
-        )
-        arr = ndimage.zoom(arr.astype("float32"), zoom=zoom_factors, order=0)
-        align_method = "resampled_nn"
-        if tuple(arr.shape) != tuple(ct_shape):
-            fixed = np.zeros(ct_shape, dtype=arr.dtype)
-            z = min(ct_shape[0], arr.shape[0])
-            y = min(ct_shape[1], arr.shape[1])
-            x = min(ct_shape[2], arr.shape[2])
-            fixed[:z, :y, :x] = arr[:z, :y, :x]
-            arr = fixed
+    for seg_fp in seg_files:
+        try:
+            seg_ds = pydicom.dcmread(str(seg_fp), force=True)
+        except Exception:
+            continue
+        if not hasattr(seg_ds, "PixelData"):
+            continue
+        seg_dcm_count += 1
+        sop_uid = str(getattr(seg_ds, "SOPInstanceUID", "")).strip()
+        if sop_uid and sop_uid in seen_uid:
+            continue
+        if sop_uid:
+            seen_uid.add(sop_uid)
+        seg_instance_count += 1
 
-    mask = (arr > 0).astype("uint8")
+        try:
+            arr = np.asarray(seg_ds.pixel_array)
+        except Exception as exc:
+            return {
+                "status": "seg_read_failed",
+                "error": str(exc),
+                "align_mode": "failed",
+                "fail_reason": "pixel_array_decode_failed",
+                "seg_dcm_count": seg_dcm_count,
+                "seg_instance_count": seg_instance_count,
+                "seg_frame_count": seg_frame_count,
+            }
+
+        if arr.ndim == 2:
+            arr = arr[np.newaxis, :, :]
+        elif arr.ndim == 4:
+            arr = arr.reshape((-1, arr.shape[-2], arr.shape[-1]))
+        if arr.ndim != 3:
+            return {
+                "status": "seg_geometry_mismatch",
+                "error": f"unsupported seg ndim={arr.ndim}",
+                "align_mode": "failed",
+                "fail_reason": "unsupported_seg_ndim",
+                "seg_dcm_count": seg_dcm_count,
+                "seg_instance_count": seg_instance_count,
+                "seg_frame_count": seg_frame_count,
+            }
+
+        if source_shape is None:
+            source_shape = tuple(arr.shape)
+        if arr.shape[1] != ct_rows or arr.shape[2] != ct_cols:
+            return {
+                "status": "seg_geometry_mismatch",
+                "error": f"frame_hw={arr.shape[1:]} != ct_hw={(ct_rows, ct_cols)}",
+                "align_mode": "failed",
+                "fail_reason": "frame_size_mismatch",
+                "source_shape": source_shape,
+                "seg_dcm_count": seg_dcm_count,
+                "seg_instance_count": seg_instance_count,
+                "seg_frame_count": seg_frame_count,
+            }
+
+        selected_segments, _all_segments = extract_segment_numbers(seg_ds)
+        per_frame = getattr(seg_ds, "PerFrameFunctionalGroupsSequence", [])
+        if per_frame and len(per_frame) != arr.shape[0]:
+            return {
+                "status": "seg_geometry_mismatch",
+                "error": f"per_frame_len={len(per_frame)} arr_frames={arr.shape[0]}",
+                "align_mode": "failed",
+                "fail_reason": "per_frame_length_mismatch",
+                "source_shape": source_shape,
+                "seg_dcm_count": seg_dcm_count,
+                "seg_instance_count": seg_instance_count,
+                "seg_frame_count": seg_frame_count,
+            }
+
+        for frame_idx in range(arr.shape[0]):
+            frame = arr[frame_idx]
+            seg_frame_count += 1
+            if float(frame.max()) <= 0.0:
+                continue
+
+            if per_frame:
+                frame_fg = per_frame[frame_idx]
+                frame_seg = frame_segment_number(frame_fg)
+                if selected_segments and frame_seg is not None and frame_seg not in selected_segments:
+                    continue
+
+                target_index = None
+                ref_uid = frame_referenced_sop_uid(frame_fg)
+                if ref_uid and ref_uid in ct_sop_to_index:
+                    target_index = int(ct_sop_to_index[ref_uid])
+                else:
+                    pos = frame_image_position(frame_fg)
+                    if pos is not None:
+                        if ct_normal is not None:
+                            frame_scalar = float(np.dot(np.asarray(pos, dtype="float64"), ct_normal))
+                        else:
+                            frame_scalar = float(pos[2])
+                        if ct_scalars:
+                            diffs = [abs(float(s) - frame_scalar) for s in ct_scalars]
+                            best_idx = int(np.argmin(np.asarray(diffs)))
+                            if diffs[best_idx] <= scalar_tolerance:
+                                target_index = best_idx
+
+                if target_index is None or target_index < 0 or target_index >= ct_shape[0]:
+                    return {
+                        "status": "seg_geometry_mismatch",
+                        "error": f"frame={frame_idx} could not map to ct slice",
+                        "align_mode": "failed",
+                        "fail_reason": "frame_to_ct_mapping_failed",
+                        "source_shape": source_shape,
+                        "seg_dcm_count": seg_dcm_count,
+                        "seg_instance_count": seg_instance_count,
+                        "seg_frame_count": seg_frame_count,
+                    }
+            else:
+                return {
+                    "status": "seg_geometry_mismatch",
+                    "error": "missing PerFrameFunctionalGroupsSequence",
+                    "align_mode": "failed",
+                    "fail_reason": "missing_per_frame_groups",
+                    "source_shape": source_shape,
+                    "seg_dcm_count": seg_dcm_count,
+                    "seg_instance_count": seg_instance_count,
+                    "seg_frame_count": seg_frame_count,
+                }
+
+            mask[target_index] = np.maximum(mask[target_index], (frame > 0).astype("uint8"))
+
+    if seg_instance_count == 0:
+        return {
+            "status": "seg_not_found",
+            "error": "no readable seg object",
+            "align_mode": "failed",
+            "fail_reason": "no_readable_seg_object",
+            "seg_dcm_count": seg_dcm_count,
+            "seg_instance_count": seg_instance_count,
+            "seg_frame_count": seg_frame_count,
+        }
     if int(mask.sum()) == 0:
-        return {"status": "seg_empty", "error": "mask is empty"}
-    return {"status": "ok", "mask": mask, "align_method": align_method, "source_shape": source_shape}
+        return {
+            "status": "seg_empty",
+            "error": "mask is empty",
+            "align_mode": "geometry_exact",
+            "fail_reason": "empty_after_filtering",
+            "source_shape": source_shape,
+            "seg_dcm_count": seg_dcm_count,
+            "seg_instance_count": seg_instance_count,
+            "seg_frame_count": seg_frame_count,
+        }
+    return {
+        "status": "ok",
+        "mask": mask,
+        "align_mode": "geometry_exact",
+        "fail_reason": "",
+        "source_shape": source_shape,
+        "seg_dcm_count": seg_dcm_count,
+        "seg_instance_count": seg_instance_count,
+        "seg_frame_count": seg_frame_count,
+    }
 
 
 def compute_roi_token(volume_norm, tumor_mask, deps):
@@ -559,8 +864,12 @@ def process_patient(patient_id, series_index, deps):
         "seg_series_dir": "",
         "seg_status": "",
         "seg_mask_npz": "",
-        "seg_align_method": "",
+        "seg_align_mode": "",
+        "seg_fail_reason": "",
         "seg_source_shape": "",
+        "seg_dcm_count": 0,
+        "seg_instance_count": 0,
+        "seg_frame_count": 0,
         "roi_token_status": "",
         "roi_token_dim": 0,
         "semantic_status": "",
@@ -599,17 +908,30 @@ def process_patient(patient_id, series_index, deps):
     seg_result = None
     if seg_row is None:
         summary["seg_status"] = "seg_series_not_found"
+        summary["seg_align_mode"] = "failed"
+        summary["seg_fail_reason"] = "seg_series_not_found"
     else:
         seg_dir = resolve_series_dir(seg_row.get("File Location"))
         summary["seg_series_dir"] = str(seg_dir)
         if ct_result is None or ct_result.get("status") != "ok":
             summary["seg_status"] = "blocked_ct_unavailable"
+            summary["seg_align_mode"] = "failed"
+            summary["seg_fail_reason"] = "ct_unavailable"
         else:
-            seg_result = load_tumor_mask(seg_dir, ct_result["volume_original"].shape, deps)
+            seg_result = load_tumor_mask(
+                seg_dir,
+                ct_result["volume_original"].shape,
+                ct_result.get("ct_geometry", {}),
+                deps,
+            )
             summary["seg_status"] = seg_result["status"]
+            summary["seg_align_mode"] = seg_result.get("align_mode", "")
+            summary["seg_fail_reason"] = seg_result.get("fail_reason", "")
+            summary["seg_dcm_count"] = int(seg_result.get("seg_dcm_count", 0))
+            summary["seg_instance_count"] = int(seg_result.get("seg_instance_count", 0))
+            summary["seg_frame_count"] = int(seg_result.get("seg_frame_count", 0))
             if seg_result["status"] == "ok":
                 summary["seg_mask_npz"] = save_seg_npz(patient_id, seg_result["mask"], deps)
-                summary["seg_align_method"] = seg_result.get("align_method", "")
                 source_shape = seg_result.get("source_shape")
                 if source_shape:
                     summary["seg_source_shape"] = "x".join(str(v) for v in source_shape)
@@ -647,7 +969,7 @@ def run_pipeline(max_cases):
     """Why: 统一调度所有病人的 5.1~5.4 处理流程。
 
     Content: 加载输入、遍历病人、执行预处理并写出结果文件。
-    Input: max_cases（最多处理多少病人，None 表示全部）。
+    Input: max_cases（最多处理多少病人，0/None 表示全部）。
     Output: 终端统计 + 产出 CSV/NPZ 文件。
     """
     ensure_output_dirs()
@@ -656,8 +978,18 @@ def run_pipeline(max_cases):
     metadata_rows = load_metadata_rows()
     series_index = build_series_index(metadata_rows)
 
-    if max_cases is not None:
-        patient_ids = patient_ids[:max_cases]
+    if max_cases is None:
+        max_cases = 0
+    if max_cases < 0:
+        raise SystemExit("--max-cases must be >= 0 (0 means all patients)")
+
+    total_cases = len(patient_ids)
+    if max_cases > 0:
+        patient_ids = patient_ids[: min(max_cases, total_cases)]
+    print(
+        f"[start] selected_cases={len(patient_ids)} total_cases={total_cases} "
+        f"full_cases={1 if max_cases == 0 else 0}"
+    )
 
     summary_rows = []
     semantic_rows = []
@@ -682,8 +1014,12 @@ def run_pipeline(max_cases):
         "seg_series_dir",
         "seg_status",
         "seg_mask_npz",
-        "seg_align_method",
+        "seg_align_mode",
+        "seg_fail_reason",
         "seg_source_shape",
+        "seg_dcm_count",
+        "seg_instance_count",
+        "seg_frame_count",
         "roi_token_status",
         "roi_token_dim",
         "semantic_status",
@@ -720,7 +1056,12 @@ def parse_args():
     Output: argparse 参数对象。
     """
     parser = argparse.ArgumentParser(description="Run imaging preprocessing pipeline (5.1~5.4).")
-    parser.add_argument("--max-cases", type=int, default=None, help="Only process first N patients.")
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        help="0 means process all patients; >0 means process first N patients.",
+    )
     return parser.parse_args()
 
 

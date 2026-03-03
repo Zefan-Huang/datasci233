@@ -1,10 +1,10 @@
 """
 作用：
-- 用 CT-ORG 做器官分割（PyTorch 2D U-Net baseline）。
+- 用 CT-ORG 做器官分割（PyTorch 2.5D U-Net baseline）。
 - 从分割结果提取 organ imaging tokens。
-- 支持 train/val 切分和 early stopping。
+- 支持 case-level train/val 切分和 early stopping。
 - 支持 run_tag 和 save_dir，避免不同超参实验互相覆盖。
-- 默认使用实测最优超参（lr=5e-4, base_channels=24），可按需覆盖。
+- 默认使用实测较优超参（lr=5e-4, base_channels=24），可按需覆盖。
 
 输入：
 - data/PKG - CT-ORG/CT-ORG/OrganSegmentations/volume-*.nii.gz
@@ -22,31 +22,77 @@ import json
 import random
 import re
 from pathlib import Path
-import numpy as np
-import scipy.ndimage as ndimage
-import nibabel as nib
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
-from torch.utils.data import Subset
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import scipy.ndimage as ndimage
+except Exception:
+    ndimage = None
+
+try:
+    import nibabel as nib
+except Exception:
+    nib = None
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader
+    from torch.utils.data import Dataset
+    from torch.utils.data import Subset
+except Exception:
+    torch = None
+    nn = None
+    F = None
+    DataLoader = None
+    Subset = None
+    Dataset = object
+
+if nn is None:
+    class _NNPlaceholder:
+        """Why: torch 缺失时让模块可导入，实际运行再统一报依赖缺失。"""
+
+        Module = object
+
+    nn = _NNPlaceholder()
 
 
 DEFAULT_ORGAN_DIR = Path("data/PKG - CT-ORG/CT-ORG/OrganSegmentations")
 DEFAULT_SAVE_DIR = Path("output/experiments/organ_seg")
 
 HU_CLIP = (-1000.0, 400.0)
+DEFAULT_ORGAN_NAME_MAP = {
+    1: "liver",
+    2: "bladder",
+    3: "lung",
+    4: "kidney",
+    5: "bone",
+    6: "brain",
+}
 
 
 def check_dependencies():
-    """Why: 运行器官分割最少依赖 torch 和 nibabel，需提前检测。
+    """Why: 运行器官分割依赖多个第三方库，需提前统一检测。
 
-    Content: 检查关键依赖是否可用。
+    Content: 检查 numpy/scipy/nibabel/torch 是否可用。
     Input: 无。
     Output: 缺失依赖名称列表。
     """
-    return []
+    missing = []
+    if np is None:
+        missing.append("numpy")
+    if ndimage is None:
+        missing.append("scipy")
+    if nib is None:
+        missing.append("nibabel")
+    if torch is None or nn is None or F is None or DataLoader is None or Subset is None:
+        missing.append("torch")
+    return missing
 
 
 def resolve_run_paths(save_dir, run_tag):
@@ -96,9 +142,8 @@ def set_seed(seed):
     """
     random.seed(seed)
     np.random.seed(seed)
-    if torch is not None:
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def parse_case_id(path):
@@ -195,68 +240,111 @@ def align_label_to_volume(label, volume_shape):
     return aligned
 
 
-def choose_slice_index(label_3d):
-    """Why: 先用 2D baseline 跑通流程，需要从 3D 中选一个有效切片。
+def select_slice_indices(indices, max_count):
+    """Why: 每个 case 直接用全部切片会过大，需要可控采样。
 
-    Content: 选择前景像素最多的轴向切片；若全空则选中间层。
-    Input: label_3d 3D 标签数组。
-    Output: 切片索引整数。
+    Content: 从索引序列中等间隔采样，最多 max_count 张。
+    Input: indices、max_count。
+    Output: 采样后的切片索引列表。
     """
-    foreground = (label_3d > 0).astype(np.int32)
-    per_slice = foreground.reshape(foreground.shape[0], -1).sum(axis=1)
-    if int(per_slice.max()) == 0:
-        return int(label_3d.shape[0] // 2)
-    return int(per_slice.argmax())
+    if not indices:
+        return []
+    if max_count is None or max_count <= 0 or len(indices) <= max_count:
+        return [int(x) for x in indices]
+    out = []
+    n = len(indices)
+    m = max_count
+    for i in range(m):
+        pos = int(round(i * (n - 1) / max(m - 1, 1)))
+        out.append(int(indices[pos]))
+    return sorted(set(out))
 
 
-def resize_2d_pair(image_2d, label_2d, image_size):
+def build_context_stack(volume, z, num_context_slices, slice_stride):
+    """Why: 2.5D 训练需要中心切片及其上下文作为多通道输入。
+
+    Content: 按对称窗口收集邻近切片并在边界做夹取。
+    Input: volume、z、num_context_slices、slice_stride。
+    Output: [C,H,W] 的 float32 数组。
+    """
+    depth = int(volume.shape[0])
+    channels = []
+    for offset in range(-num_context_slices, num_context_slices + 1):
+        idx = z + offset * slice_stride
+        idx = max(0, min(depth - 1, idx))
+        channels.append(np.asarray(volume[idx], dtype=np.float32))
+    return np.stack(channels, axis=0).astype(np.float32)
+
+
+def resize_multichannel_and_label(image_chw, label_hw, image_size):
     """Why: 模型输入尺寸需要统一，便于 batch 训练。
 
-    Content: 对图像用线性插值、标签用最近邻插值缩放到固定尺寸。
-    Input: image_2d、label_2d、image_size。
-    Output: (resized_image_2d, resized_label_2d)。
+    Content: 多通道图像用线性插值，标签用最近邻插值缩放到固定尺寸。
+    Input: image_chw、label_hw、image_size。
+    Output: (resized_image_chw, resized_label_hw)。
     """
-    target_h, target_w = image_size, image_size
-    zoom_h = target_h / image_2d.shape[0]
-    zoom_w = target_w / image_2d.shape[1]
-    image_resized = ndimage.zoom(image_2d, zoom=(zoom_h, zoom_w), order=1)
-    label_resized = ndimage.zoom(label_2d, zoom=(zoom_h, zoom_w), order=0)
+    target_h, target_w = int(image_size), int(image_size)
+    zoom_h = target_h / image_chw.shape[1]
+    zoom_w = target_w / image_chw.shape[2]
+    image_resized = ndimage.zoom(image_chw, zoom=(1.0, zoom_h, zoom_w), order=1)
+    label_resized = ndimage.zoom(label_hw, zoom=(zoom_h, zoom_w), order=0)
     image_resized = np.asarray(image_resized, dtype=np.float32)
     label_resized = np.asarray(np.rint(label_resized), dtype=np.int64)
     return image_resized, label_resized
 
 
-class CTORGSliceDataset(Dataset):
-    """Why: 训练 DataLoader 需要标准 Dataset 接口。
+class CTORG25DSliceDataset(Dataset):
+    """Why: 2.5D 分割训练需要 slice-level 样本，并保留 case-level 索引。
 
-    Content: 预加载 case 的单切片图像和器官标签。
-    Input: pairs、max_cases、image_size。
-    Output: 可迭代样本集合，每项含 image/mask/case_id。
+    Content: 预加载 case 的多切片样本，构建 case->sample 索引与代表切片。
+    Input: pairs、max_cases、image_size、num_context_slices、slice_stride、max_slices_per_case。
+    Output: 可迭代样本集合，每项含 image/mask/case_id/slice_idx。
     """
 
-    def __init__(self, pairs, max_cases, image_size):
+    def __init__(self, pairs, max_cases, image_size, num_context_slices, slice_stride, max_slices_per_case):
         self.samples = []
+        self.case_to_indices = {}
+        self.representative_indices = []
         selected = pairs[:max_cases]
         total = len(selected)
         for i, (case_id, vol_path, lab_path) in enumerate(selected, start=1):
             print(f"[load] {i}/{total} case_id={case_id}", flush=True)
             volume = normalize_ct(load_nifti_array(vol_path))
-            label = load_nifti_array(lab_path)
-            label = align_label_to_volume(label, volume.shape)
-            slice_idx = choose_slice_index(label)
-            image_2d = volume[slice_idx]
-            label_2d = label[slice_idx]
-            image_2d, label_2d = resize_2d_pair(image_2d, label_2d, image_size)
-            self.samples.append(
-                {
+            label = align_label_to_volume(load_nifti_array(lab_path), volume.shape)
+
+            foreground_per_slice = (label > 0).reshape(label.shape[0], -1).sum(axis=1)
+            fg_indices = np.where(foreground_per_slice > 0)[0].tolist()
+            if not fg_indices:
+                fg_indices = [int(label.shape[0] // 2)]
+            sampled_indices = select_slice_indices(fg_indices, max_slices_per_case)
+            rep_z = int(np.argmax(foreground_per_slice)) if int(foreground_per_slice.max()) > 0 else int(label.shape[0] // 2)
+            if rep_z not in sampled_indices:
+                sampled_indices.append(rep_z)
+            sampled_indices = sorted(set(int(z) for z in sampled_indices))
+
+            case_sample_indices = []
+            for z in sampled_indices:
+                image_chw = build_context_stack(volume, z, num_context_slices, slice_stride)
+                mask_hw = np.asarray(label[z], dtype=np.int64)
+                image_chw, mask_hw = resize_multichannel_and_label(image_chw, mask_hw, image_size)
+                sample = {
                     "case_id": case_id,
                     "volume_path": str(vol_path),
                     "label_path": str(lab_path),
-                    "slice_idx": int(slice_idx),
-                    "image": image_2d[None, :, :],
-                    "mask": label_2d,
+                    "slice_idx": int(z),
+                    "image": image_chw,
+                    "mask": mask_hw,
+                    "is_representative": int(z) == int(rep_z),
                 }
-            )
+                case_sample_indices.append(len(self.samples))
+                self.samples.append(sample)
+
+            self.case_to_indices[case_id] = case_sample_indices
+            rep_indices = [idx for idx in case_sample_indices if self.samples[idx]["is_representative"]]
+            if rep_indices:
+                self.representative_indices.append(rep_indices[0])
+            elif case_sample_indices:
+                self.representative_indices.append(case_sample_indices[0])
 
     def __len__(self):
         return len(self.samples)
@@ -302,8 +390,8 @@ class SmallUNet(nn.Module):
     """Why: 先做可跑通 baseline，U-Net 是医学分割的稳健起点。
 
     Content: 轻量 2D U-Net，同时提供 token feature map 分支。
-    Input: x [B,1,H,W]。
-    Output: logits [B,C,H,W]，可选 token 特征图 [B,T,h,w]。
+    Input: x [B,C,H,W]。
+    Output: logits [B,K,H,W]，可选 token 特征图 [B,T,h,w]。
     """
 
     def __init__(self, in_channels, num_classes, base_channels, token_dim):
@@ -323,10 +411,9 @@ class SmallUNet(nn.Module):
         self.up1 = nn.ConvTranspose2d(c2, c1, kernel_size=2, stride=2)
         self.dec1 = DoubleConv(c1 + c1, c1)
         self.head = nn.Conv2d(c1, num_classes, kernel_size=1)
-
         self.token_head = nn.Conv2d(c3, token_dim, kernel_size=1)
 
-    def forward(self, x, return_token_map):
+    def forward(self, x, return_token_map=False):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         b = self.bottleneck(self.pool2(e2))
@@ -360,6 +447,52 @@ def infer_num_classes(dataset, num_classes_arg):
     return int(max_label + 1)
 
 
+def build_organ_name_map(num_classes):
+    """Why: 下游 6.2/6.3 需要可读器官名，不能只用 organ_1 这类占位名。
+
+    Content: 按 CT-ORG 官方编码构建 organ_id->organ_name 映射。
+    Input: num_classes。
+    Output: 字典，键为器官 id（不含背景）。
+    """
+    out = {}
+    for organ_id in range(1, num_classes):
+        out[organ_id] = DEFAULT_ORGAN_NAME_MAP.get(organ_id, f"organ_{organ_id}")
+    return out
+
+
+def split_train_val_case_ids(case_ids, val_ratio, seed):
+    """Why: 训练和验证必须按 case 切分，避免同病例切片泄漏。
+
+    Content: 打乱 case ids 后按比例切分。
+    Input: case_ids、val_ratio、seed。
+    Output: (train_case_ids, val_case_ids)。
+    """
+    if len(case_ids) <= 1 or val_ratio <= 0:
+        return list(case_ids), []
+    case_ids = list(case_ids)
+    rng = random.Random(seed)
+    rng.shuffle(case_ids)
+    val_n = int(round(len(case_ids) * val_ratio))
+    val_n = max(1, val_n)
+    val_n = min(val_n, len(case_ids) - 1)
+    val_ids = sorted(case_ids[:val_n])
+    train_ids = sorted(case_ids[val_n:])
+    return train_ids, val_ids
+
+
+def case_ids_to_sample_indices(dataset, case_ids):
+    """Why: DataLoader 训练的是切片样本，需要从 case 集映射到 sample 索引。
+
+    Content: 收集每个 case 下所有样本索引。
+    Input: dataset、case_ids。
+    Output: 排序后的 sample 索引列表。
+    """
+    indices = []
+    for cid in case_ids:
+        indices.extend(dataset.case_to_indices.get(cid, []))
+    return sorted(indices)
+
+
 def multiclass_dice(logits, target, num_classes):
     """Why: 仅看 CE loss 不直观，Dice 更贴近分割质量。
 
@@ -382,31 +515,6 @@ def multiclass_dice(logits, target, num_classes):
         if not dice_vals:
             return 0.0
         return float(sum(dice_vals) / len(dice_vals))
-
-
-def split_train_val_indices(num_samples, val_ratio, seed):
-    """Why: 早停需要验证集指标，先把样本划分成 train/val。
-
-    Content: 随机打乱索引并按比例切分，保证 train 和 val 不为空（在可行时）。
-    Input: num_samples、val_ratio、seed。
-    Output: (train_indices, val_indices)。
-    """
-    if num_samples <= 0:
-        return [], []
-    if num_samples == 1 or val_ratio <= 0:
-        return list(range(num_samples)), []
-
-    indices = list(range(num_samples))
-    rng = random.Random(seed)
-    rng.shuffle(indices)
-
-    val_n = int(round(num_samples * val_ratio))
-    val_n = max(1, val_n)
-    val_n = min(val_n, num_samples - 1)
-
-    val_indices = indices[:val_n]
-    train_indices = indices[val_n:]
-    return train_indices, val_indices
 
 
 def evaluate_model(model, loader, device, num_classes, criterion):
@@ -607,32 +715,36 @@ def l2_normalize_1d(vec):
     return vec / norm
 
 
-def extract_and_save_tokens(model, dataset, device, num_classes, pred_dir):
+def extract_and_save_tokens(model, dataset, device, num_classes, pred_dir, organ_name_map):
     """Why: 分割之后要产出器官 imaging tokens 供多模态建模。
 
-    Content: 对每个 case 推理，保存预测 mask，并按器官求 token。
-    Input: model、dataset、device、num_classes、pred_dir。
+    Content: 对每个 case 的代表切片推理，保存预测 mask，并按器官求 token。
+    Input: model、dataset、device、num_classes、pred_dir、organ_name_map。
     Output: token CSV 行列表。
     """
     token_rows = []
     model.eval()
 
+    rep_indices = list(dataset.representative_indices)
     with torch.no_grad():
-        total = len(dataset.samples)
-        for i, sample in enumerate(dataset.samples, start=1):
+        total = len(rep_indices)
+        for i, sample_idx in enumerate(rep_indices, start=1):
+            sample = dataset.samples[sample_idx]
             case_id = sample["case_id"]
-            print(f"[token] {i}/{total} case_id={case_id}", flush=True)
-            image_np = sample["image"]  # [1,H,W]
+            slice_idx = int(sample["slice_idx"])
+            print(f"[token] {i}/{total} case_id={case_id} slice={slice_idx}", flush=True)
+            image_np = sample["image"]  # [C,H,W]
             mask_np = sample["mask"]  # [H,W]
 
-            image = torch.from_numpy(image_np).unsqueeze(0).to(device)  # [1,1,H,W]
+            image = torch.from_numpy(image_np).unsqueeze(0).to(device)  # [1,C,H,W]
             logits, token_map = model(image, return_token_map=True)
             pred = torch.argmax(logits, dim=1)[0]  # [H,W]
 
             np.savez_compressed(
-                pred_dir / f"case_{case_id}.npz",
+                pred_dir / f"case_{case_id}_slice_{slice_idx}.npz",
                 pred_mask=pred.cpu().numpy().astype(np.int16),
                 gt_mask=mask_np.astype(np.int16),
+                slice_idx=np.asarray([slice_idx], dtype=np.int16),
             )
 
             token_map_up = F.interpolate(
@@ -660,7 +772,9 @@ def extract_and_save_tokens(model, dataset, device, num_classes, pred_dir):
                 token_rows.append(
                     {
                         "case_id": case_id,
+                        "slice_idx": slice_idx,
                         "organ_id": int(organ_id),
+                        "organ_name": organ_name_map.get(int(organ_id), f"organ_{organ_id}"),
                         "mask_source": source,
                         "voxel_count": int(region.sum().item()),
                         "token_json": json.dumps([float(x) for x in token.cpu().tolist()]),
@@ -677,13 +791,26 @@ def parse_args():
     Output: 参数对象。
     """
     parser = argparse.ArgumentParser(
-        description="CT-ORG organ segmentation + organ imaging tokens.",
+        description="CT-ORG organ segmentation + organ imaging tokens (2.5D).",
         allow_abbrev=False,
     )
     parser.add_argument("--organ-dir", type=str, default=str(DEFAULT_ORGAN_DIR))
     parser.add_argument("--save-dir", type=str, default=str(DEFAULT_SAVE_DIR))
     parser.add_argument("--run-tag", type=str, default="search_base24")
-    parser.add_argument("--max-cases", type=int, default=140)
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        help="0 means use all CT-ORG cases; >0 means use first N cases.",
+    )
+    parser.add_argument(
+        "--max-slices-per-case",
+        type=int,
+        default=0,
+        help="0 means use all foreground slices per case; >0 means cap to N slices.",
+    )
+    parser.add_argument("--num-context-slices", type=int, default=1, help="1 means 3-channel 2.5D.")
+    parser.add_argument("--slice-stride", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=5e-4)
@@ -715,12 +842,23 @@ def main():
         raise SystemExit(
             "missing dependency: "
             + miss
-            + ". install example: .venv/bin/pip install torch nibabel"
+            + ". install example: .venv/bin/pip install numpy scipy nibabel torch"
         )
 
     run_tag = args.run_tag.strip()
     if not run_tag:
         raise SystemExit("--run-tag must not be empty")
+    if args.max_cases < 0:
+        raise SystemExit("--max-cases must be >= 0 (0 means all cases)")
+    if args.max_slices_per_case < 0:
+        raise SystemExit("--max-slices-per-case must be >= 0 (0 means all slices)")
+    if args.num_context_slices < 0:
+        raise SystemExit("--num-context-slices must be >= 0")
+    if args.slice_stride <= 0:
+        raise SystemExit("--slice-stride must be >= 1")
+    if args.val_ratio < 0 or args.val_ratio >= 1:
+        raise SystemExit("--val-ratio must be in [0, 1)")
+
     set_seed(args.seed)
     run_paths = resolve_run_paths(args.save_dir, run_tag)
     ensure_output_dirs(run_paths)
@@ -729,41 +867,60 @@ def main():
     print(f"[start] organ_dir={organ_dir}", flush=True)
     print(f"[start] save_dir={args.save_dir} run_tag={run_tag}", flush=True)
     print(
-        f"[start] max_cases={args.max_cases} epochs={args.epochs} "
-        f"batch_size={args.batch_size} lr={args.lr} "
+        f"[start] max_cases={args.max_cases} max_slices_per_case={args.max_slices_per_case} "
+        f"full_cases={1 if args.max_cases == 0 else 0} "
+        f"full_slices={1 if args.max_slices_per_case == 0 else 0} "
+        f"context={args.num_context_slices} stride={args.slice_stride} "
+        f"epochs={args.epochs} batch_size={args.batch_size} lr={args.lr} "
         f"val_ratio={args.val_ratio} "
         f"early_stop=({args.early_stop_metric},patience={args.early_stop_patience},min_delta={args.early_stop_min_delta})",
         flush=True,
     )
+    print(
+        f"[deps] torch={torch.__version__} cuda_available={torch.cuda.is_available()} "
+        f"numpy={np.__version__}",
+        flush=True,
+    )
+
     pairs = find_case_pairs(organ_dir)
     if not pairs:
         raise SystemExit(f"no volume-label pair found under: {organ_dir}")
     print(f"[start] found_pairs={len(pairs)}", flush=True)
-    if args.max_cases <= 0:
-        raise SystemExit("--max-cases must be >= 1")
-    if args.val_ratio < 0 or args.val_ratio >= 1:
-        raise SystemExit("--val-ratio must be in [0, 1)")
+
+    selected_cases = len(pairs) if args.max_cases == 0 else min(args.max_cases, len(pairs))
+    selected_max_slices = None if args.max_slices_per_case == 0 else int(args.max_slices_per_case)
 
     print("[stage] build dataset", flush=True)
-    dataset = CTORGSliceDataset(
+    dataset = CTORG25DSliceDataset(
         pairs=pairs,
-        max_cases=min(args.max_cases, len(pairs)),
+        max_cases=selected_cases,
         image_size=args.image_size,
+        num_context_slices=args.num_context_slices,
+        slice_stride=args.slice_stride,
+        max_slices_per_case=selected_max_slices,
     )
     if len(dataset) == 0:
         raise SystemExit("dataset is empty after filtering")
 
     num_classes = infer_num_classes(dataset, args.num_classes)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device: {device}")
-    print(f"cases_selected: {len(dataset)}")
-    print(f"num_classes: {num_classes}")
+    organ_name_map = build_organ_name_map(num_classes)
+    in_channels = args.num_context_slices * 2 + 1
 
-    train_indices, val_indices = split_train_val_indices(len(dataset), args.val_ratio, args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    case_ids = sorted(dataset.case_to_indices.keys(), key=lambda x: int(x))
+    train_case_ids, val_case_ids = split_train_val_case_ids(case_ids, args.val_ratio, args.seed)
+    train_indices = case_ids_to_sample_indices(dataset, train_case_ids)
+    val_indices = case_ids_to_sample_indices(dataset, val_case_ids)
+
+    print(f"device: {device}")
+    print(f"cases_selected: {len(case_ids)}")
+    print(f"slices_selected: {len(dataset)}")
+    print(f"train_cases: {len(train_case_ids)} train_slices: {len(train_indices)}")
+    print(f"val_cases: {len(val_case_ids)} val_slices: {len(val_indices)}")
+    print(f"num_classes: {num_classes} in_channels: {in_channels}")
+
     train_dataset = Subset(dataset, train_indices)
     val_dataset = Subset(dataset, val_indices) if val_indices else None
-    print(f"train_cases: {len(train_indices)}")
-    print(f"val_cases: {len(val_indices)}")
 
     print("[stage] build model", flush=True)
     train_loader = DataLoader(
@@ -782,7 +939,7 @@ def main():
         )
 
     model = SmallUNet(
-        in_channels=1,
+        in_channels=in_channels,
         num_classes=num_classes,
         base_channels=args.base_channels,
         token_dim=args.token_dim,
@@ -809,18 +966,25 @@ def main():
             f"{train_result['monitor_metric']}={train_result['best_metric']}",
             flush=True,
         )
+
     for row in logs:
         row["run_tag"] = run_tag
         row["seed"] = args.seed
         row["max_cases"] = args.max_cases
-        row["train_cases"] = len(train_indices)
-        row["val_cases"] = len(val_indices)
+        row["train_cases"] = len(train_case_ids)
+        row["val_cases"] = len(val_case_ids)
+        row["train_slices"] = len(train_indices)
+        row["val_slices"] = len(val_indices)
         row["batch_size"] = args.batch_size
         row["lr"] = args.lr
         row["base_channels"] = args.base_channels
         row["token_dim"] = args.token_dim
         row["image_size"] = args.image_size
         row["num_classes"] = num_classes
+        row["in_channels"] = in_channels
+        row["num_context_slices"] = args.num_context_slices
+        row["slice_stride"] = args.slice_stride
+        row["max_slices_per_case"] = args.max_slices_per_case
         row["val_ratio"] = args.val_ratio
         row["early_stop_patience"] = args.early_stop_patience
         row["early_stop_min_delta"] = args.early_stop_min_delta
@@ -842,12 +1006,18 @@ def main():
             "max_cases",
             "train_cases",
             "val_cases",
+            "train_slices",
+            "val_slices",
             "batch_size",
             "lr",
             "base_channels",
             "token_dim",
             "image_size",
             "num_classes",
+            "in_channels",
+            "num_context_slices",
+            "slice_stride",
+            "max_slices_per_case",
             "val_ratio",
             "early_stop_patience",
             "early_stop_min_delta",
@@ -862,12 +1032,22 @@ def main():
         device=device,
         num_classes=num_classes,
         pred_dir=run_paths["pred_dir"],
+        organ_name_map=organ_name_map,
     )
     for row in token_rows:
         row["run_tag"] = run_tag
     write_csv(
         run_paths["token_csv"],
-        ["run_tag", "case_id", "organ_id", "mask_source", "voxel_count", "token_json"],
+        [
+            "run_tag",
+            "case_id",
+            "slice_idx",
+            "organ_id",
+            "organ_name",
+            "mask_source",
+            "voxel_count",
+            "token_json",
+        ],
         token_rows,
     )
 
@@ -878,9 +1058,14 @@ def main():
             "run_tag": run_tag,
             "save_dir": str(args.save_dir),
             "num_classes": num_classes,
+            "organ_name_map": {str(k): v for k, v in organ_name_map.items()},
             "base_channels": args.base_channels,
             "token_dim": args.token_dim,
             "image_size": args.image_size,
+            "in_channels": in_channels,
+            "num_context_slices": args.num_context_slices,
+            "slice_stride": args.slice_stride,
+            "max_slices_per_case": args.max_slices_per_case,
             "max_cases": args.max_cases,
             "batch_size": args.batch_size,
             "lr": args.lr,
@@ -892,8 +1077,10 @@ def main():
             "best_metric_name": train_result["monitor_metric"],
             "best_metric_value": train_result["best_metric"],
             "stopped_early": train_result["stopped_early"],
-            "train_cases": len(train_indices),
-            "val_cases": len(val_indices),
+            "train_cases": len(train_case_ids),
+            "val_cases": len(val_case_ids),
+            "train_slices": len(train_indices),
+            "val_slices": len(val_indices),
         },
         model_path,
     )

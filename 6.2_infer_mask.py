@@ -16,7 +16,6 @@
 """
 import argparse
 import csv
-import hashlib
 import json
 from pathlib import Path
 
@@ -33,9 +32,11 @@ except Exception:
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 except Exception:
     torch = None
     nn = None
+    F = None
 
 if nn is None:
     class _NNPlaceholder:
@@ -203,9 +204,9 @@ class DoubleConv(nn.Module):
 class SmallUNet(nn.Module):
     """Why: 推理网络必须和 6.1_seg_model.py 训练网络同构。
 
-    Content: 轻量 2D U-Net，输出多类别分割 logits。
+    Content: 轻量 2D U-Net，输出多类别分割 logits，并可选返回 token feature map。
     Input: x [B,C,H,W]。
-    Output: logits [B,K,H,W]。
+    Output: logits [B,K,H,W]，可选 token_map [B,T,h,w]。
     """
 
     def __init__(self, in_channels, num_classes, base_channels, token_dim):
@@ -229,7 +230,7 @@ class SmallUNet(nn.Module):
         # Keep this layer for state_dict compatibility with the training model.
         self.token_head = nn.Conv2d(c3, token_dim, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x, return_token_map=False):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         b = self.bottleneck(self.pool2(e2))
@@ -241,7 +242,10 @@ class SmallUNet(nn.Module):
         d1 = torch.cat([d1, e1], dim=1)
         d1 = self.dec1(d1)
         logits = self.head(d1)
-        return logits
+        if return_token_map:
+            token_map = self.token_head(b)
+            return logits, token_map
+        return logits, None
 
 
 def parse_organ_map_from_ckpt(ckpt, num_classes):
@@ -295,13 +299,30 @@ def load_model(model_path, device):
         slice_stride = 1
         organ_map = build_default_organ_map(num_classes)
 
+    if "token_head.weight" not in state_dict or "token_head.bias" not in state_dict:
+        raise RuntimeError(
+            "checkpoint is missing token_head weights; stage 6.3 learned organ tokens require a 6.1-compatible checkpoint"
+        )
+    token_head_weight = state_dict["token_head.weight"]
+    if int(token_head_weight.shape[0]) != token_dim:
+        raise RuntimeError(
+            "checkpoint token_head weight shape does not match token_dim metadata: "
+            + f"weight_out={int(token_head_weight.shape[0])} token_dim={token_dim}"
+        )
+
     model = SmallUNet(
         in_channels=in_channels,
         num_classes=num_classes,
         base_channels=base_channels,
         token_dim=token_dim,
     )
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "failed to load 6.1-compatible organ segmentation checkpoint with learned token head: "
+            + str(exc)
+        ) from exc
     model.to(device)
     model.eval()
     meta = {
@@ -369,17 +390,32 @@ def resize_mask_back(mask_2d, target_h, target_w):
     return resized
 
 
-def infer_volume_multilabel_mask(model, ct_volume, image_size, batch_slices, device, num_context_slices, slice_stride):
-    """Why: 6.2 需要对每个病人的 3D CT 推理器官分割结果。
+def infer_volume_multilabel_mask_and_token_stats(
+    model,
+    ct_volume,
+    image_size,
+    batch_slices,
+    device,
+    num_context_slices,
+    slice_stride,
+    organ_map,
+):
+    """Why: 6.2/6.3 需要同一次推理同时得到 3D mask 和 learned organ token 统计量。
 
-    Content: 对每个轴向切片做 2.5D 分割，并堆叠成 3D 多类别 mask。
-    Input: model、ct_volume、image_size、batch_slices、device、num_context_slices、slice_stride。
-    Output: pred_mask_3d（int16）。
+    Content: 对每个轴向切片做 2.5D 分割，回到原 CT 尺寸后按器官区域累计 token_map 求和。
+    Input: model、ct_volume、image_size、batch_slices、device、num_context_slices、slice_stride、organ_map。
+    Output: (pred_mask_3d, token_sum_by_organ_id, token_voxel_count_by_organ_id)。
     """
     depth = ct_volume.shape[0]
     h = ct_volume.shape[1]
     w = ct_volume.shape[2]
     pred_mask = np.zeros((depth, h, w), dtype=np.int16)
+    token_dim = int(model.token_head.out_channels)
+    token_sums = {
+        int(organ_id): np.zeros((token_dim,), dtype=np.float64)
+        for organ_id in organ_map.keys()
+    }
+    token_voxel_counts = {int(organ_id): 0 for organ_id in organ_map.keys()}
 
     resized_slices = []
     for z in range(depth):
@@ -394,15 +430,34 @@ def infer_volume_multilabel_mask(model, ct_volume, image_size, batch_slices, dev
         batch_np = np.stack(resized_slices[start:end], axis=0)
         batch_t = torch.from_numpy(batch_np).to(device)
         with torch.no_grad():
-            logits = model(batch_t)
+            logits, token_map = model(batch_t, return_token_map=True)
             pred = torch.argmax(logits, dim=1).cpu().numpy().astype(np.int16)
+            token_map_up = F.interpolate(
+                token_map,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            ).detach().cpu()
 
         for i in range(pred.shape[0]):
             z = start + i
-            pred_mask[z] = resize_mask_back(pred[i], h, w)
+            mask_2d = resize_mask_back(pred[i], h, w)
+            pred_mask[z] = mask_2d
+
+            token_map_slice = token_map_up[i]
+            mask_tensor = torch.from_numpy(mask_2d)
+            for organ_id in organ_map.keys():
+                organ_id = int(organ_id)
+                region = mask_tensor == organ_id
+                voxel_count = int(region.sum().item())
+                if voxel_count == 0:
+                    continue
+                pooled_sum = token_map_slice[:, region].sum(dim=1).numpy().astype(np.float64)
+                token_sums[organ_id] += pooled_sum
+                token_voxel_counts[organ_id] += voxel_count
         start = end
 
-    return pred_mask
+    return pred_mask, token_sums, token_voxel_counts
 
 
 def build_missing_flags(pred_mask, organ_map, min_organ_voxels):
@@ -439,77 +494,45 @@ def save_patient_mask_npz(path, pred_mask, organ_map, source_ct_npz):
     )
 
 
-def stable_random_projection(token_dim, feature_dim, seed_text):
-    """Why: 6.3 需要固定维度 token，随机投影需可复现。
+def l2_normalize_token(token):
+    """Why: learned organ token 需要做尺度标准化，便于后续融合与比较。
 
-    Content: 基于 seed_text 生成可复现的高斯投影矩阵。
-    Input: token_dim、feature_dim、seed_text。
-    Output: [token_dim, feature_dim] float32 投影矩阵。
+    Content: 对一维 token 向量做 L2 归一化。
+    Input: token。
+    Output: float32 一维向量。
     """
-    digest = hashlib.sha1(seed_text.encode("utf-8")).hexdigest()
-    seed = int(digest[:8], 16)
-    rng = np.random.RandomState(seed)
-    return rng.normal(loc=0.0, scale=0.1, size=(token_dim, feature_dim)).astype(np.float32)
+    arr = np.asarray(token, dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm <= 0.0:
+        return arr
+    return arr / norm
 
 
-def build_organ_token(ct_volume, organ_mask, token_dim, organ_id):
-    """Why: 6.3 需要把器官 ROI 压缩成固定维度 token。
-
-    Content: 计算器官 ROI 统计特征后做随机投影与 L2 归一化。
-    Input: ct_volume、organ_mask、token_dim、organ_id。
-    Output: token 列表。
-    """
-    idx = np.where(organ_mask > 0)
-    vals = ct_volume[idx]
-    zmin, zmax = int(idx[0].min()), int(idx[0].max())
-    ymin, ymax = int(idx[1].min()), int(idx[1].max())
-    xmin, xmax = int(idx[2].min()), int(idx[2].max())
-
-    features = np.asarray(
-        [
-            float(vals.mean()),
-            float(vals.std()),
-            float(vals.min()),
-            float(vals.max()),
-            float(np.percentile(vals, 25)),
-            float(np.percentile(vals, 50)),
-            float(np.percentile(vals, 75)),
-            float(vals.size / max(ct_volume.size, 1)),
-            float((vals > 0.6).mean()),
-            float((zmax - zmin + 1) / ct_volume.shape[0]),
-            float((ymax - ymin + 1) / ct_volume.shape[1]),
-            float((xmax - xmin + 1) / ct_volume.shape[2]),
-            float((zmin + zmax) / 2.0 / max(ct_volume.shape[0] - 1, 1)),
-            float((ymin + ymax) / 2.0 / max(ct_volume.shape[1] - 1, 1)),
-            float((xmin + xmax) / 2.0 / max(ct_volume.shape[2] - 1, 1)),
-        ],
-        dtype=np.float32,
-    )
-    proj = stable_random_projection(token_dim, features.shape[0], f"organ_{organ_id}")
-    token = np.tanh(proj.dot(features))
-    norm = float(np.linalg.norm(token))
-    if norm > 0:
-        token = token / norm
-    return [float(x) for x in token.tolist()]
-
-
-def extract_organ_tokens_for_case(patient_id, ct_volume, pred_mask, organ_map, mask_npz_path, min_organ_voxels, token_dim):
+def extract_organ_tokens_for_case(
+    patient_id,
+    organ_map,
+    mask_npz_path,
+    min_organ_voxels,
+    token_sums,
+    token_voxel_counts,
+):
     """Why: 6.3 需要每例每器官 token，且要兼容器官缺失。
 
-    Content: 对每个器官统计体素、判断 missing，并在可用时生成 token。
-    Input: patient_id、ct_volume、pred_mask、organ_map、mask_npz_path、min_organ_voxels、token_dim。
+    Content: 对每个器官使用推理阶段累计的 token_map 求和结果生成 L2 归一化 token。
+    Input: patient_id、organ_map、mask_npz_path、min_organ_voxels、token_sums、token_voxel_counts。
     Output: organ token 行列表。
     """
     rows = []
     for organ_id, organ_name in organ_map.items():
-        organ_mask = pred_mask == organ_id
-        voxel_count = int(organ_mask.sum())
+        organ_id = int(organ_id)
+        voxel_count = int(token_voxel_counts.get(organ_id, 0))
         missing = 1 if voxel_count < min_organ_voxels else 0
         token_json = ""
         status = "missing"
         if missing == 0:
-            token = build_organ_token(ct_volume, organ_mask, token_dim, organ_id)
-            token_json = json.dumps(token)
+            token = token_sums[organ_id] / float(voxel_count)
+            token = l2_normalize_token(token)
+            token_json = json.dumps([float(x) for x in token.tolist()])
             status = "ok"
         rows.append(
             {
@@ -654,9 +677,16 @@ def main():
     num_context_slices = meta["num_context_slices"]
     slice_stride = meta["slice_stride"]
     organ_map = meta["organ_map"]
+    model_token_dim = int(meta["token_dim"])
+    if args.token_dim != model_token_dim:
+        raise SystemExit(
+            "--token-dim must match checkpoint token_dim for learned organ tokens: "
+            + f"arg={args.token_dim} checkpoint={model_token_dim}"
+        )
     print(
         f"[model] num_classes={num_classes} image_size={image_size} base_channels={meta['base_channels']} "
-        f"in_channels={meta['in_channels']} context={num_context_slices} stride={slice_stride}",
+        f"in_channels={meta['in_channels']} context={num_context_slices} stride={slice_stride} "
+        f"token_dim={model_token_dim}",
         flush=True,
     )
 
@@ -701,7 +731,7 @@ def main():
                     raise RuntimeError("ct_volume key missing")
                 ct_volume = np.asarray(z["ct_volume"], dtype=np.float32)
 
-            pred_mask = infer_volume_multilabel_mask(
+            pred_mask, token_sums, token_voxel_counts = infer_volume_multilabel_mask_and_token_stats(
                 model=model,
                 ct_volume=ct_volume,
                 image_size=image_size,
@@ -709,6 +739,7 @@ def main():
                 device=device,
                 num_context_slices=num_context_slices,
                 slice_stride=slice_stride,
+                organ_map=organ_map,
             )
             missing_dict, voxel_dict = build_missing_flags(
                 pred_mask=pred_mask,
@@ -749,19 +780,18 @@ def main():
 
             case_token_rows = extract_organ_tokens_for_case(
                 patient_id=patient_id,
-                ct_volume=ct_volume,
-                pred_mask=pred_mask,
                 organ_map=organ_map,
                 mask_npz_path=out_mask_path,
                 min_organ_voxels=args.min_organ_voxels,
-                token_dim=args.token_dim,
+                token_sums=token_sums,
+                token_voxel_counts=token_voxel_counts,
             )
             for row in case_token_rows:
                 row["run_tag"] = run_tag
                 row["model_path"] = str(model_path)
                 row["batch_slices"] = args.batch_slices
                 row["min_organ_voxels"] = args.min_organ_voxels
-                row["token_dim"] = args.token_dim
+                row["token_dim"] = model_token_dim
             token_rows.extend(case_token_rows)
 
             ok_count += 1

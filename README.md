@@ -1,6 +1,6 @@
 # NSCLC Multimodal Organ Diffusion Pipeline
 
-> **For the full methodology and results, see [1. REPORT.md](report.md).**
+> **For the full methodology and results, see [1. REPORT.md](1.%20REPORT.md).**
 
 This repository contains a staged multimodal pipeline for non-small cell lung
 cancer (NSCLC) prediction and explanation. The project combines CT imaging,

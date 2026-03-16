@@ -3,7 +3,10 @@
 > **For the full methodology and results, see [1. REPORT.md](1.%20REPORT.md).**
 
 This repository contains a staged multimodal pipeline for non-small cell lung
-cancer (NSCLC) prediction and explanation. The project combines CT imaging,
+cancer (NSCLC) prediction and explanation built on two public datasets:
+NSCLC Radiogenomics as the main patient-level cohort for CT, RNA, clinical,
+and outcome modeling, and CT-ORG as the auxiliary dataset for organ
+segmentation and anatomical alignment. The project combines CT imaging,
 clinical tabular features, RNA expression, and immune-derived signals into an
 organ-level representation, then applies cross-attention and graph reasoning to
 predict survival and recurrence while exporting latent organ diffusion

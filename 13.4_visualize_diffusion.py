@@ -25,12 +25,29 @@ DISPLAY_NAME_MAP = {
 }
 
 KNOWN_POSITIONS = {
-    "Primary": (220.0, 280.0),
-    "Lung": (460.0, 130.0),
-    "Bone": (470.0, 415.0),
-    "Liver": (700.0, 360.0),
-    "LymphNodeMediastinum": (360.0, 245.0),
-    "Brain": (710.0, 100.0),
+    "Primary": (210.0, 360.0),
+    "Lung": (470.0, 192.0),
+    "Bone": (510.0, 512.0),
+    "Liver": (736.0, 416.0),
+    "LymphNodeMediastinum": (390.0, 318.0),
+    "Brain": (760.0, 168.0),
+}
+
+LABEL_OFFSETS = {
+    "Primary": (0.0, -92.0),
+    "Lung": (0.0, 86.0),
+    "Bone": (0.0, 86.0),
+    "Liver": (0.0, 86.0),
+    "LymphNodeMediastinum": (-4.0, 90.0),
+    "Brain": (0.0, 86.0),
+}
+
+CURVE_BEND_MAP = {
+    "Lung": -64.0,
+    "Bone": 92.0,
+    "Liver": 34.0,
+    "LymphNodeMediastinum": -26.0,
+    "Brain": -116.0,
 }
 
 
@@ -179,6 +196,50 @@ def shorten_segment(start_xy, end_xy, start_pad, end_pad):
     )
 
 
+def quadratic_control_point(start_xy, end_xy, bend):
+    x1, y1 = start_xy
+    x2, y2 = end_xy
+    dx = x2 - x1
+    dy = y2 - y1
+    dist = math.hypot(dx, dy)
+    if dist <= 1e-6:
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    nx = -dy / dist
+    ny = dx / dist
+    mx = (x1 + x2) / 2.0
+    my = (y1 + y2) / 2.0
+    return mx + nx * float(bend), my + ny * float(bend)
+
+
+def path_quadratic(start_xy, control_xy, end_xy):
+    return (
+        f"M {start_xy[0]:.1f} {start_xy[1]:.1f} "
+        f"Q {control_xy[0]:.1f} {control_xy[1]:.1f} {end_xy[0]:.1f} {end_xy[1]:.1f}"
+    )
+
+
+def label_box_geometry(organ_name, x, y, graph_bounds):
+    lines = wrap_label(organ_name)
+    label_dx, label_dy = LABEL_OFFSETS.get(organ_name, (0.0, -78.0))
+    label_cx = x + label_dx
+    label_cy = y + label_dy
+    max_len = max(len(line) for line in lines + ["sus 0.00"])
+    width = max(112.0, 10.2 * max_len + 28.0)
+    height = 22.0 + 18.0 * len(lines) + 24.0
+    x_min, x_max, y_min, y_max = graph_bounds
+    box_x = clamp(label_cx - width / 2.0, x_min, x_max - width)
+    box_y = clamp(label_cy - height / 2.0, y_min, y_max - height)
+    return {
+        "lines": lines,
+        "box_x": box_x,
+        "box_y": box_y,
+        "width": width,
+        "height": height,
+        "center_x": box_x + width / 2.0,
+        "center_y": box_y + height / 2.0,
+    }
+
+
 def format_prob(value):
     return f"{float(value):.2f}"
 
@@ -209,14 +270,20 @@ def render_svg(
     side_lines,
     output_path,
 ):
-    width = 1180
-    height = 620
-    graph_right = 820
+    width = 1240
+    height = 680
     positions = get_positions(organ_names)
     radii = {}
     for organ_name in organ_names:
         score = clamp(safe_float(susceptibility_by_organ.get(organ_name, 0.0)), 0.0, 1.0)
-        radii[organ_name] = 24.0 + 18.0 * score
+        radii[organ_name] = 18.0 + 14.0 * score
+
+    graph_bounds = (52.0, 820.0, 120.0, 590.0)
+    label_layouts = {
+        organ_name: label_box_geometry(organ_name, positions[organ_name][0], positions[organ_name][1], graph_bounds)
+        for organ_name in organ_names
+        if organ_name in positions
+    }
 
     svg = []
     svg.append(
@@ -224,23 +291,28 @@ def render_svg(
     )
     svg.append("<defs>")
     svg.append('<linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">')
-    svg.append('<stop offset="0%" stop-color="#f6f4ed"/>')
-    svg.append('<stop offset="100%" stop-color="#efe6d3"/>')
+    svg.append('<stop offset="0%" stop-color="#f8fafc"/>')
+    svg.append('<stop offset="100%" stop-color="#eef2f7"/>')
     svg.append("</linearGradient>")
     svg.append(
-        '<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" '
-        'markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">'
+        '<filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">'
+        '<feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.10"/>'
+        "</filter>"
     )
-    svg.append('<path d="M 0 0 L 10 5 L 0 10 z" fill="#20406d"/>')
+    svg.append(
+        '<marker id="arrow" viewBox="0 0 14 14" refX="11.5" refY="7" '
+        'markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse">'
+    )
+    svg.append('<path d="M 0 0 L 14 7 L 0 14 z" fill="#1f4f82"/>')
     svg.append("</marker>")
     svg.append("</defs>")
-    svg.append('<rect x="0" y="0" width="1180" height="620" fill="url(#bg)"/>')
-    svg.append('<rect x="26" y="24" width="790" height="572" rx="26" fill="#fffdf8" stroke="#d7ccb5" stroke-width="2"/>')
-    svg.append('<rect x="840" y="24" width="314" height="572" rx="26" fill="#fffdf8" stroke="#d7ccb5" stroke-width="2"/>')
-    svg.append(f'<text x="54" y="68" font-family="Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#2c2318">{html.escape(title)}</text>')
-    svg.append(f'<text x="54" y="96" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#6f6558">{html.escape(subtitle)}</text>')
-    svg.append('<text x="54" y="126" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#7c715f">Arrow width and opacity encode predicted diffusion probability from Primary.</text>')
-    svg.append('<text x="866" y="62" font-family="Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#2c2318">Reading Panel</text>')
+    svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="url(#bg)"/>')
+    svg.append('<rect x="24" y="24" width="834" height="632" rx="28" fill="#fffdfb" stroke="#dbe3ee" stroke-width="2" filter="url(#softShadow)"/>')
+    svg.append('<rect x="886" y="24" width="330" height="632" rx="28" fill="#fffdfb" stroke="#dbe3ee" stroke-width="2" filter="url(#softShadow)"/>')
+    svg.append(f'<text x="56" y="70" font-family="Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#172554">{html.escape(title)}</text>')
+    svg.append(f'<text x="56" y="100" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#475569">{html.escape(subtitle)}</text>')
+    svg.append('<text x="56" y="126" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#64748b">Straight arrows encode outgoing diffusion from Primary; node size and fill encode organ susceptibility.</text>')
+    svg.append('<text x="914" y="62" font-family="Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#172554">Reading Panel</text>')
 
     for edge in primary_outgoing_edges:
         src_name = edge["src_name"]
@@ -250,62 +322,80 @@ def render_svg(
         prob = clamp(edge["edge_diffusion_prob"], 0.0, 1.0)
         x1, y1 = positions[src_name]
         x2, y2 = positions[dst_name]
-        sx, sy, ex, ey, ux, uy = shorten_segment(
+        sx, sy, ex, ey, _ux, _uy = shorten_segment(
             (x1, y1),
             (x2, y2),
             radii[src_name] + 8.0,
-            radii[dst_name] + 12.0,
+            radii[dst_name] + 11.0,
         )
-        stroke = blend_color((154, 180, 213), (32, 64, 109), prob)
-        stroke_width = 1.8 + 9.0 * prob
-        opacity = 0.24 + 0.72 * prob
+        stroke = blend_color((168, 193, 222), (31, 79, 130), prob)
+        stroke_width = 2.2 + 9.2 * prob
+        opacity = 0.36 + 0.56 * prob
+        svg.append(
+            f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="#dbe9f5" '
+            f'stroke-width="{stroke_width + 5.5:.2f}" stroke-linecap="round" opacity="0.28"/>'
+        )
         svg.append(
             f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="{stroke}" '
             f'stroke-width="{stroke_width:.2f}" stroke-linecap="round" opacity="{opacity:.3f}" marker-end="url(#arrow)"/>'
-        )
-        mx = (sx + ex) / 2.0 - uy * 13.0
-        my = (sy + ey) / 2.0 + ux * 13.0
-        svg.append(
-            f'<rect x="{mx - 20:.1f}" y="{my - 11:.1f}" width="40" height="20" rx="10" fill="#fffdf8" opacity="0.92"/>'
-        )
-        svg.append(
-            f'<text x="{mx:.1f}" y="{my + 4:.1f}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" '
-            f'font-size="12" font-weight="700" fill="#183153">{format_prob(prob)}</text>'
         )
 
     for organ_name in organ_names:
         x, y = positions[organ_name]
         score = clamp(safe_float(susceptibility_by_organ.get(organ_name, 0.0)), 0.0, 1.0)
-        fill = blend_color((232, 240, 231), (175, 57, 48), score)
-        stroke = "#5b4e3c" if organ_name == "Primary" else "#8b7f6c"
-        stroke_width = 4 if organ_name == "Primary" else 2
+        fill = blend_color((233, 243, 235), (176, 59, 49), score)
+        stroke = "#7c2d12" if organ_name == "Primary" else "#64748b"
+        stroke_width = 4 if organ_name == "Primary" else 2.4
         radius = radii[organ_name]
+        svg.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius + 4.0:.1f}" fill="#ffffff" opacity="0.88"/>'
+        )
         svg.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius:.1f}" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}"/>'
         )
-        lines = wrap_label(organ_name)
-        for idx, line in enumerate(lines):
-            y_text = y - 2 + idx * 16 - ((len(lines) - 1) * 8)
+        if organ_name == "Primary":
             svg.append(
-                f'<text x="{x:.1f}" y="{y_text:.1f}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" '
-                f'font-size="13" font-weight="700" fill="#1f1a14">{html.escape(line)}</text>'
+                f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" '
+                f'font-size="15" font-weight="800" fill="#fff7ed">P</text>'
+            )
+
+        layout = label_layouts[organ_name]
+        bx = layout["box_x"]
+        by = layout["box_y"]
+        bw = layout["width"]
+        bh = layout["height"]
+        lines = layout["lines"]
+        svg.append(
+            f'<line x1="{x:.1f}" y1="{y:.1f}" x2="{layout["center_x"]:.1f}" y2="{layout["center_y"]:.1f}" '
+            f'stroke="#b6c4d5" stroke-width="1.8" opacity="0.95"/>'
+        )
+        svg.append(
+            f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bw:.1f}" height="{bh:.1f}" rx="15" fill="#ffffff" '
+            f'stroke="#d3deea" stroke-width="1.6"/>'
+        )
+        name_start_y = by + 21.0
+        for idx, line in enumerate(lines):
+            svg.append(
+                f'<text x="{layout["center_x"]:.1f}" y="{name_start_y + idx * 16.0:.1f}" text-anchor="middle" '
+                f'font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#0f172a">{html.escape(line)}</text>'
             )
         svg.append(
-            f'<text x="{x:.1f}" y="{y + radius + 18:.1f}" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" '
-            f'font-size="12" fill="#6f6558">sus {format_prob(score)}</text>'
+            f'<text x="{layout["center_x"]:.1f}" y="{by + bh - 10.0:.1f}" text-anchor="middle" '
+            f'font-family="Helvetica, Arial, sans-serif" font-size="11.5" fill="#475569">sus {format_prob(score)}</text>'
         )
 
-    svg.append('<rect x="864" y="88" width="266" height="40" rx="14" fill="#efe6d3"/>')
-    svg.append('<circle cx="890" cy="108" r="9" fill="#b03831"/>')
-    svg.append('<text x="910" y="113" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#2c2318">Node fill = organ susceptibility</text>')
-    svg.append('<line x1="874" y1="145" x2="930" y2="145" stroke="#20406d" stroke-width="7" marker-end="url(#arrow)"/>')
-    svg.append('<text x="946" y="150" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#2c2318">Arrow = predicted direction from Primary</text>')
-    svg.append('<text x="866" y="190" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#2c2318">Key Numbers</text>')
+    svg.append('<rect x="914" y="86" width="274" height="46" rx="16" fill="#f7fafc" stroke="#dbe3ee" stroke-width="1.4"/>')
+    svg.append('<circle cx="940" cy="109" r="10" fill="#b03831"/>')
+    svg.append('<text x="962" y="114" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1e293b">Node fill and size = susceptibility</text>')
+    svg.append('<line x1="924" y1="154" x2="1018" y2="154" stroke="#c7daee" stroke-width="11" stroke-linecap="round" opacity="0.30"/>')
+    svg.append('<line x1="924" y1="154" x2="1018" y2="154" stroke="#1f4f82" stroke-width="5.5" stroke-linecap="round" marker-end="url(#arrow)"/>')
+    svg.append('<text x="1040" y="159" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1e293b">Straight arrow = outgoing diffusion</text>')
+    svg.append('<text x="914" y="206" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#172554">Key Numbers</text>')
 
-    y = 220
+    y = 238
     for line in side_lines:
         svg.append(
-            f'<text x="866" y="{y}" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#3e3429">{html.escape(line)}</text>'
+            f'<text x="914" y="{y}" font-family="Helvetica, Arial, sans-serif" font-size="14" fill="#334155">{html.escape(line)}</text>'
         )
         y += 24
 

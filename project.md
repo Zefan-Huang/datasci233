@@ -1,385 +1,396 @@
-# Plan A: Multi-modal “Organ Diffusion” Predictor (Deployable Version) — Full Pipeline :contentReference[oaicite:0]{index=0}
+# Multimodal Graph Reasoning for Implicit Metastasis Pathway Inference and Survival Prediction
 
-> **Core idea**: Use **RNA expression** as the backbone signal (global molecular context). Align imaging (CT/PET), clinical tabular data (EHR-like), and immune features derived from RNA into **organ-level tokens**. Fuse modalities via **Cross-Attention**, then perform structured reasoning over an **organ topology graph**.  
-> **Key tradeoff**: Public cohorts (e.g., NSCLC Radiogenomics) often lack organ-level “true metastasis sites/paths” labels. Therefore, the **primary supervised tasks** are objectively verifiable **OS/recurrence (time-to-event)**, while organ diffusion (nodes/edges/paths) is produced as a **latent explanation layer**—without claiming organ-level ground-truth supervision.
+This document describes the repository as it currently exists. It replaces the earlier plan-style description with an implementation-level summary that matches the code, outputs, and training results in this project.
 
----
+## 1. Project goal
 
-## 0. Verifiable objectives and outputs
+This repository implements a staged multimodal pipeline for non-small cell lung cancer (NSCLC) with three main objectives:
 
-### 0.1 Primary supervised tasks (trainable, evaluable)
-1) **Overall Survival (OS)** modeling: time-to-event (Cox or discrete-time hazard)  
-2) **Recurrence risk + recurrence site (mandatory task)**: Recurrence (yes/no), Recurrence Location (e.g., local/regional/distant; depends on available fields)
+1. Predict overall survival (OS)
+2. Predict recurrence risk and recurrence location
+3. Produce organ-level latent diffusion explanations in the form of organ susceptibility, edge diffusion tendencies, and top-k organ paths
 
-### 0.2 Explanation outputs (latent diffusion; not supervised with organ truth)
-- **Organ susceptibility profile**: one score per organ `s_o` (relative susceptibility / spread tendency)
-- **Inter-organ diffusion tendency matrix**: edge tendency `p_{i→j}`
-- **Top-k diffusion paths**: most likely paths derived from `p_{i→j}` (for interpretation)
+The key modeling choice is that organ/path outputs are treated as a latent explanation layer rather than organ-level ground-truth supervision. The public cohort supports survival and recurrence labels much more reliably than true metastatic path labels, so the prediction tasks are supervised directly, while the diffusion graph is constrained indirectly by those tasks.
 
----
+## 2. Datasets actually used
 
-## 1. Data selection and roles
+### 2.1 NSCLC Radiogenomics
 
-### 1.1 Primary cohort (required): NSCLC Radiogenomics (TCIA)
-**Use**: main multimodal training + primary task evaluation (OS/recurrence)  
-**Includes**: CT, PET/CT, tumor semantic annotations (AIM), tumor segmentations (DICOM-SEG), clinical follow-up, molecular data (RNA-seq subset).
+This is the primary patient-level cohort used throughout the project.
 
-> Imaging coverage is typically lung apex → adrenal glands; therefore “distal organs (e.g., brain) missing in imaging” is common and requires explicit missingness handling.
+It provides:
+- CT for all cases
+- PET for most cases
+- tumor segmentations for a subset
+- AIM semantic annotations for a subset
+- clinical follow-up labels
+- RNA expression for a subset
 
-### 1.2 Alignment / organ segmentation training set (recommended): CT-ORG (TCIA)
-**Use**: train/calibrate an organ segmentation model so “imaging → organ ROI → organ token” is reliable  
-**Includes**: 140 CTs + multi-organ 3D segmentations (lung/bones/liver/kidneys/bladder; some brain)
+The current manifest in `output/patient_manifest.csv` contains:
+- 211 patients with CT
+- 201 with PET
+- 144 with tumor segmentation
+- 190 with AIM annotations
+- 130 with RNA-seq
 
-> CT-ORG does not need patient-level pairing with Radiogenomics; it’s for training/benchmarking the organ alignment module.
+This cohort is the source of:
+- survival labels
+- recurrence labels
+- recurrence location labels
+- multimodal patient-level modeling
 
-### 1.3 (Optional but strongly recommended) imaging pretraining cohort: NSCLC-Radiomics (Lung1)
-**Use**: pretrain the imaging encoder to mitigate small sample size in the primary cohort  
-**Includes**: 422 NSCLC CTs + outcomes
+### 2.2 CT-ORG
 
----
+This is the auxiliary dataset used for organ segmentation and anatomical alignment.
 
-## 2. Data retrieval and on-disk organization (engineering setup)
+In the current implementation, CT-ORG is not a second outcome cohort. It is used to support the stage-6 organ segmentation module so that patient CT can be converted into organ-level imaging evidence.
 
-### 2.1 NSCLC Radiogenomics (TCIA + GEO)
-**Download**
-- CT (DICOM)
-- optional PET/CT (DICOM)
-- tumor segmentation: DICOM Segmentation Object (DICOM-SEG)
-- semantic annotations: AIM files
-- clinical CSV
-- RNA-seq: GEO dataset (e.g., GSE103584; raw/processed)
+## 3. Repository structure and actual pipeline
 
-**Suggested directory layout**
-- `data/nsclc_rg/imaging/<PatientID>/<Study>/<Series>/*.dcm`
-- `data/nsclc_rg/seg/<PatientID>/*.dcm` (DICOM-SEG)
-- `data/nsclc_rg/aim/<PatientID>/*.xml`
-- `data/nsclc_rg/clinical/clinical.csv`
-- `data/nsclc_rg/rnaseq/GSE103584/*`
+The repository is organized as a stage-based workflow. The implemented path is:
 
-### 2.2 CT-ORG (TCIA)
-**Download**
-- CT NIfTI
-- organ label NIfTI
-- official train/test split (if provided)
+### 3.1 Data cleaning and label construction
 
-**Suggested directory layout**
-- `data/ctorg/images/*.nii.gz`
-- `data/ctorg/labels/*.nii.gz`
-- `data/ctorg/split/train.txt`
-- `data/ctorg/split/test.txt`
+Files:
+- `prepare_clean/total_table.py`
+- `prepare_clean/label_construction_time_zero.py`
+- `prepare_clean/imaging_preprocessing.py`
+- `5.2_stage5_tumor_mask_provider_batch.py`
 
----
+This part of the pipeline:
+- builds the patient manifest
+- aligns clinical rows, imaging availability, AIM files, segmentation availability, and RNA IDs
+- constructs OS and recurrence labels using CT time as time zero
+- prepares normalized imaging inputs and tumor masks
 
-## 3. Build a patient-modality availability manifest
+### 3.2 Organ segmentation and organ imaging evidence
 
-### 3.1 Generate `patient_manifest.csv`
-**Inputs**
-- TCIA patient list
-- `clinical.csv`
-- existence checks: CT/PET, DICOM-SEG, AIM, RNA-seq (GEO subset)
+Files:
+- `6.1_unet.py`
+- `6.1_seg_model.py`
+- `6.2_infer_mask.py`
 
-**Recommended fields (minimal)**
-- `patient_id`
-- `has_ct`, `has_pet`, `has_seg`, `has_aim`, `has_rnaseq`
-- OS: `event_os`, `time_os`
-- recurrence: `event_rec`, `time_rec`, `rec_location_class` (mapped from clinical fields)
+This stage trains or applies an organ segmentation model and exports organ masks or organ-level imaging evidence. The resulting masks are used downstream to create organ imaging tokens.
 
-> Modalities are not fully available for every patient; missingness must be managed explicitly.
+Existing outputs include organ segmentation artifacts under:
+- `output/experiments/organ_seg/`
 
-### 3.2 Define two training cohorts
-- **Cohort-A (larger)**: ~211 cases (imaging + clinical) → robust baseline
-- **Cohort-B (multimodal subset)**: ~130 cases (imaging + clinical + RNA) → multimodal fine-tuning
+### 3.3 RNA, immune, and clinical encoding
 
----
+Files:
+- `7.1_rna_alignment.py`
+- `7.2_rna_encoder.py`
+- `7.3_immune_token.py`
+- `8.1_clinical_feature_engineering.py`
+- `8.2_ehr_encoder.py`
 
-## 4. Label construction and time zero (avoid leakage)
+This part aligns RNA expression to patient IDs, creates RNA embeddings, derives immune-related tokens from RNA, engineers clinical variables, and creates EHR embeddings.
 
-### 4.1 Time zero `t0`
-Use **CT date** as time=0 (since CT is part of the input).
+### 3.4 Organ tokenization
 
-### 4.2 OS labels
-**Inputs**: survival status, date of death, date of last known alive  
-**Outputs**
-- `time_os = (death_or_last_alive_date) - t0`
-- `event_os = 1 if dead else 0`
+Files:
+- `9.1_organ_tokenization.py`
+- `9.2_organ_query.py`
 
-### 4.3 Recurrence labels (mandatory)
-**Inputs**: recurrence, recurrence location, date of recurrence  
-**Outputs**
-- `event_rec`
-- `time_rec` (censored if no recurrence)
-- `rec_location_class` (encode available classes)
+The project defines a fixed six-node organ set:
+- `Primary`
+- `Lung`
+- `Bone`
+- `Liver`
+- `LymphNodeMediastinum`
+- `Brain`
 
-> Never feed future event dates into the model as input features—use them only as labels.
+At this stage, the project creates:
+- evidence tokens from imaging, tumor, semantics, RNA, immune, and clinical data
+- fixed organ queries for the six organ nodes
 
----
+This is the bridge between raw multimodal features and the later graph.
 
-## 5. Imaging preprocessing (CT/PET/SEG/AIM → tensors)
+### 3.5 Stage 10: multimodal cross-attention fusion
 
-### 5.1 CT normalization
-**Steps**
-1) select the primary CT series (rules by description/thickness/kernel)
-2) DICOM → volume (prefer NIfTI)
-3) resample to uniform spacing (e.g., 1–2 mm isotropic)
-4) HU clipping + normalization (e.g., clip `[-1000, 400]`)
+File:
+- `10.1_multimodal_fusion.py`
 
-**Outputs**
-- `ct_volume ∈ R^{D×H×W}`
-- `ct_meta` (spacing/origin, etc.)
+This stage implements `OrganCrossAttentionFusion`.
 
-### 5.2 Tumor segmentation (DICOM-SEG → mask)
-**Output**
-- `mask_tumor ∈ {0,1}^{D×H×W}` aligned to `ct_volume`
+What it does:
+- Query = fixed organ queries
+- Key/Value = multimodal evidence tokens
+- Output = fused organ embeddings `Z`
 
-### 5.3 Tumor ROI token (most stable imaging signal)
-**Steps**
-- bbox + margin crop → `ct_tumor_patch`
-- 3D encoder (3D CNN / Swin3D / ResNet3D)
-- pooling → token
+Important implementation detail:
+- this stage is currently run in `eval()` mode
+- it uses `torch.no_grad()`
+- the exported summary marks it as `random_init_only: True`
 
-**Output**
-- `t_tumor ∈ R^d`
+So Stage 10 is implemented and used, but it is not trained as a supervised fusion block in the current pipeline. It acts as a fixed random-weight transform.
 
-### 5.4 Semantic annotation token (optional but valuable)
-**Steps**
-- parse AIM categorical/continuous fields
-- embedding/one-hot + normalization
-- MLP → token(s)
+### 3.6 Stage 11: graph construction and graph reasoning
 
-**Outputs**
-- `t_sem ∈ R^d` or `T_sem = {t_sem^k}`
+Files:
+- `11.1_graph_construction.py`
+- `11.2_graph_reasoning.py`
 
----
+Stage 11.1 builds the six-node organ graph with weak anatomical priors and residual logits.
 
-## 6. Organ segmentation and organ imaging tokens (enhancement)
+The current graph uses prior edges such as:
+- `Primary <-> Lung`
+- `Primary <-> LymphNodeMediastinum`
+- `Primary -> Bone`
+- `Primary -> Liver`
+- `Primary -> Brain`
+- `LymphNodeMediastinum -> Bone/Liver/Brain`
 
-> You can run Plan A without organ segmentation first; add this module for stronger organ-level alignment.
+Stage 11.2 applies a graph transformer style reasoning module:
+- input: `Z`
+- output: `Z_prime`
+- explanation heads: organ susceptibility and edge diffusion probabilities
 
-### 6.1 Train/calibrate an organ segmentation model on CT-ORG
-**Model**: nnU-Net / 3D U-Net / SwinUNETR  
-**Focus organs**: lung / bone / liver (most relevant to chest/upper abdomen FOV)
+Important implementation detail:
+- this stage is also run in `eval()` mode
+- it also uses `torch.no_grad()`
+- the exported summary marks it as `random_init_only: True`
 
-### 6.2 Infer organ masks on NSCLC Radiogenomics CT
-**Outputs**
-- `mask_organ[o]` for visible organs
-- `missing_img_organ[o]` for not visible / not usable organs
+So Stage 11.2 is also a fixed reservoir-style transform in the current codebase rather than a separately trained GNN.
 
-### 6.3 Extract organ imaging tokens (ROI pooling)
-**Method**
-- backbone feature map + masked pooling, or ROI crop + encoder
+### 3.7 Stage 12: prediction heads and explanation-guided training
 
-**Output**
-- `t_img[o] ∈ R^d` (may be missing)
+Files:
+- `12.1_primary_outputs.py`
+- `12.2_explanation_outputs.py`
+- `12.2_explanation_training.py`
 
----
+This is where the main supervised learning actually happens.
 
-## 7. RNA and immune tokens (GEO → `g_rna` + `t_imm`)
+`12.2_explanation_training.py` trains an `ExplanationGuidedPrimaryModel` on top of `Z_prime`. The model:
+- pools `Z_prime`
+- computes organ susceptibility and edge diffusion probabilities
+- forms context features from susceptibility and outgoing primary-node edges
+- predicts OS
+- predicts recurrence
+- predicts recurrence location
+- adds auxiliary explanation-related losses and edge-prior regularization
 
-### 7.1 RNA alignment (GEO → PatientID)
-**Outputs**
-- `x_rna ∈ R^G` (e.g., log1p(TPM/FPKM) + standardization)
+In other words:
+- Stage 10 and Stage 11.2 are fixed feature transforms
+- Stage 12 is the trainable prediction layer that makes the project meaningful as a supervised model
 
-### 7.2 RNA encoder (backbone embedding)
-**Steps**
-- gene filtering (e.g., top-5k variance genes)
-- RNA encoder (MLP / lightweight Transformer)
+### 3.8 Stage 13: phased training, tuning, comparison, and visualization
 
-**Outputs**
-- `g_rna ∈ R^d`
-- optional `T_rna` (e.g., pathway tokens)
+Files:
+- `13.1_phase3_baseline.py`
+- `13.2_phase4_rna_finetune.py`
+- `13.2_tune_phase4.py`
+- `13.3_compare_phases.py`
+- `13.4_visualize_diffusion.py`
+- `13.5_result_heatmap.py`
 
-### 7.3 Immune / microenvironment token (derive from RNA first)
-**Steps**
-- compute immune signatures (ssGSEA/GSVA or marker sets)
-- MLP → token
+This stage packages the pipeline into reportable experiments:
 
-**Outputs**
-- `t_imm ∈ R^d` (or multiple tokens)
+- Phase 3: 211-patient baseline without RNA
+- Phase 4: 130-patient RNA fine-tuning
+- Phase 4 tuning: multiple runs and best-run selection
+- phase comparison summaries
+- cohort-level and patient-level diffusion visualizations
+- paired organ-by-patient heatmap for stage-12 vs tuned stage-13 explanation outputs
 
----
+### 3.9 Stage 15: case bundling and external inference
 
-## 8. Clinical/EHR token (`clinical.csv` → `g_ehr`)
+Files:
+- `15.1_case_inputs.py`
+- `15.2_system_outputs.py`
+- `15.3_run_inference_bundle.py`
+- `15.4_external_case_inference.py`
 
-### 8.1 Clinical feature engineering
-- continuous: standardize + missing indicators
-- categorical: embeddings (recommended) or one-hot
-- exclude future outcome dates as inputs
+This stage turns the research pipeline into a deployable reporting flow. It supports:
+- packaging an internal case
+- generating system outputs and HTML artifacts
+- running an external-case inference smoke test
 
-**Output**
-- `x_ehr ∈ R^p`
+Existing outputs include:
+- `output/stage15/15.4_external_case_inference_smoke_R01-003/`
+- `output/stage15/console_api_smoke/`
 
-### 8.2 EHR encoder
-**Model**: MLP (MVP)
+## 4. What is actually trained
 
-**Output**
-- `g_ehr ∈ R^d`
+This is the most important implementation clarification.
 
----
+### 4.1 Not trained end-to-end
 
-## 9. Organ tokenization (organ-level alignment)
+The following blocks are currently used as fixed transforms:
+- Stage 10 cross-attention fusion
+- Stage 11.2 graph reasoning
 
-### 9.1 Define organ node set `O`
-Given FOV limits, start with “coverable + clinically relevant”:
-- `Primary` (primary tumor node)
-- `Lung`, `Bone`, `Liver`
-- `LymphNode/Mediastinum` (proxy via semantics/clinical)
-- `Brain` (often imaging-missing; infer from RNA/clinical + missing mask)
+They are instantiated, run in inference mode, and exported. They are not optimized jointly with the final objectives in the current codebase.
 
-### 9.2 Organ queries (key: no organ×gene RNA required)
-Learnable organ embedding per organ `e_o ∈ R^d`, modulated by global context:
+### 4.2 Trained with supervision
 
-- `q_o = e_o + MLP([g_rna, g_ehr, t_imm, t_tumor])`
+The main trainable model is the Stage-12 explanation-guided prediction model, which is then used in Stage 13 for:
+- baseline training
+- RNA fine-tuning
+- tuning and model selection
 
-**Output**
-- `Q = { q_o | o ∈ O }`
+So the scientific claim supported by the current code is:
+- the project trains a supervised prediction layer on top of fixed multimodal graph features
 
-### 9.3 Assemble evidence tokens (Keys/Values)
-Example tokens:
-- `t_tumor` (almost always present)
-- `t_img[o]` (if organ visible)
-- `t_sem` (if AIM exists)
-- `g_rna` / `T_rna` (if RNA exists)
-- `g_ehr`
-- `t_imm`
+It is not yet a fully end-to-end trained transformer-plus-GNN model.
 
-**Output**
-- token set `T = {tokens}` + `mask_missing_tokens`
+## 5. Current result files and main outputs
 
----
+The main reportable results live in `output/`.
 
-## 10. Multimodal fusion (Cross-Attention with organ queries)
+### 5.1 Stage 12 cross-validation
 
-For each organ `o`:
+Directory:
+- `output/stage12/12.1_primary_outputs_cv/`
 
-**Inputs**
-- Query: `q_o`
-- Key/Value: `T`
-- `mask_missing_tokens`
+Key file:
+- `cv_summary.json`
 
-**Process**
-- `h_o = CrossAttn(q_o, K=T, V=T, mask=missing)`
-- `z_o = LN(q_o + h_o)`
-- `z_o = LN(z_o + FFN(z_o))`
+Main out-of-fold metrics:
+- OOF C-index: `0.5307`
+- OOF recurrence AUC: `0.5667`
+- OOF location accuracy: `0.3765`
 
-**Output**
-- fused organ tokens `Z = { z_o }`
+### 5.2 Phase 3 baseline on 211 patients
 
----
+Directory:
+- `output/stage13/13.1_phase3_baseline/`
 
-## 11. Organ-graph reasoning
+Key file:
+- `phase3_summary.json`
 
-### 11.1 Graph construction (weak priors + learnable residual)
-**Nodes**: organs `O`  
-**Sparse prior edges (example)**
-- Primary ↔ Lung
-- Primary ↔ LN/Mediastinum
-- Primary → Bone / Liver / Brain (weak)
-- LN → distant organs (weak)
+Validation metrics:
+- C-index: `0.6421`
+- recurrence AUC: `0.6749`
+- location accuracy: `0.4615`
 
-> Priors provide inductive bias; they do **not** claim true biological routes.
+This is the strongest survival-oriented result in the current project.
 
-### 11.2 Graph reasoning module
-**Model**: GAT / Graph Transformer (1–3 layers)  
-**Output**
-- structured node representations `Z' = { z'_o }`
+### 5.3 Initial Phase 4 RNA fine-tuning on 130 patients
 
----
+Directory:
+- `output/stage13/13.2_phase4_rna_finetune/`
 
-## 12. Heads: primary outputs + explanation outputs
+Key file:
+- `phase4_summary.json`
 
-### 12.1 Primary supervised outputs
-#### A) OS survival head
-**Aggregation options**
-- attention pooling: `u = AttnPool(Z')`
-- or weighted sum: `u = Σ_o α_o z'_o`
+Validation metrics:
+- C-index: `0.5340`
+- recurrence AUC: `0.5263`
+- location accuracy: `0.4444`
 
-**Survival head**
-- Cox: outputs `r_os` (log-risk)
-- discrete time: outputs `hazard[t]` → survival curve
+This run shows that adding RNA does not automatically improve performance when the multimodal subset is smaller.
 
-#### B) Recurrence head (mandatory)
-Outputs:
-- `P(recurrence)`
-- `P(recurrence_location = k)`
+### 5.4 Tuned Phase 4 best run
 
-### 12.2 Explanation outputs (latent diffusion)
-#### A) Organ susceptibility
-- `s_o = sigmoid(MLP(z'_o))`
+Directory:
+- `output/stage13/13.2_phase4_tune/`
 
-#### B) Edge diffusion tendency matrix
-- `p_{i→j} = sigmoid(MLP([z'_i, z'_j, e_{ij}]))`
+Key files:
+- `tuning_summary.json`
+- `best_config.json`
+- `phase4_model_best/`
+- `explanation_outputs_best/`
 
-#### C) Top-k path explanation (derived)
-- beam search / k-shortest paths from `Primary` using `P_edge`
+Best tuned validation metrics:
+- C-index: `0.5109`
+- recurrence AUC: `0.6959`
+- location accuracy: `0.3333`
 
-> **Important**: organ/path outputs are a model-induced latent diffusion map to explain OS/recurrence predictions; do not claim organ-level ground-truth supervision.
+This is the best recurrence discrimination result in the repository.
 
----
+### 5.5 Explanation outputs
 
-## 13. Training strategy (phased; fits 211 + 130 structure)
+Directory:
+- `output/stage13/13.2_phase4_tune/explanation_outputs_best/`
 
-### Phase 1: organ segmentation (CT-ORG)
-- train `OrganSegModel`
-- metrics: Dice/HD95 (lung/bone/liver, etc.)
+Key files:
+- `explanation_summary.json`
+- `organ_susceptibility.csv`
+- `edge_diffusion_long.csv`
+- `topk_paths.json`
+- `patient_explanations.json`
 
-### Phase 2 (optional): imaging encoder pretraining (NSCLC-Radiomics 422)
-- self-supervised (MAE/contrastive) or weak supervision (OS in coarse time bins)
+Current interpretation summary:
+- top-1 path is usually `Primary -> Bone`
+- in the best tuned run, the top-1 path fraction is `0.9769`
+- explanation outputs are explicitly marked as latent and not organ-level ground truth
 
-### Phase 3: baseline training on larger cohort (211: imaging + clinical)
-- start without RNA for stability:
-  - inputs: `t_tumor + g_ehr (+ t_sem)`
-  - task: OS + recurrence (mandatory)
+### 5.6 Visualization outputs
 
-### Phase 4: multimodal fine-tuning (130: imaging + clinical + RNA)
-- add RNA encoder, immune tokens, cross-attn, graph
-- freeze parts of imaging encoder to reduce overfitting
-- joint optimization: OS + recurrence (mandatory multi-task)
+Directories:
+- `output/stage13/13.4_visualize_diffusion/`
+- `output/stage13/13.5_result_heatmap/`
 
----
+These include:
+- cohort diffusion SVGs
+- patient-level diffusion SVGs
+- a paired stage-12 vs stage-13 research heatmap
 
-## 14. Loss design (primary supervision + stability regularization)
+## 6. Files supporting the report
 
-### 14.1 Primary losses
-- OS: Cox partial likelihood or discrete-time NLL
-- recurrence (mandatory): weighted BCE / CE
-- label-missing mask for recurrence/location fields when specific records are unavailable
+Main documentation files:
+- `README.md`
+- `1. REPORT.md`
+- `project.md`
 
-### 14.2 Missing-modality robustness (highly recommended)
-- **modality dropout**: randomly drop tokens during training to simulate missingness
-- **missingness masks**: explicitly mask missing tokens and invisible organs in attention
+Main figure assets already created:
+- `report_assets/academic_architecture_transformer_gnn_joint.svg`
+- `report_assets/cohort_primary_diffusion.svg`
+- `report_assets/R01-151_primary_diffusion.svg`
+- `report_assets/R01-106_primary_diffusion.svg`
+- `report_assets/R01-049_primary_diffusion.svg`
+- `report_assets/R01-026_primary_diffusion.svg`
 
-### 14.3 Light regularization for explanation layer (optional; small weight)
-- edge sparsity regularization (avoid uniform fully-connected edges)
-- graph smoothness (reduce noisy organ outputs)
+## 7. Known limitations of the current project
 
----
+1. Stage 10 and Stage 11.2 are not trained end-to-end
+2. Explanation outputs are latent model-induced structures, not verified metastasis-path labels
+3. The RNA subset is smaller than the full cohort, so RNA-based fine-tuning is less stable for survival
+4. Recurrence-location labels are sparse, which limits location accuracy
 
-## 15. Inference and deliverables
+These limitations should be stated clearly in any report or presentation.
 
-### 15.1 Case inputs
-- CT (optional PET/CT)
-- tumor segmentation (Radiogenomics provides it; external cases may need a segmenter)
-- clinical tabular features
-- RNA (if available)
+## 8. Minimal interpretation of the current scientific contribution
 
-### 15.2 System outputs
-1) **Primary**
-   - OS risk score / survival curve
-   - recurrence probability + recurrence site probabilities
+The current repository supports the following accurate claim:
 
-2) **Explanation**
-   - organ susceptibility vector `{s_o}`
-   - edge tendency matrix `{p_{i→j}}`
-   - top-k diffusion paths (from Primary)
+This project implements an end-to-end staged multimodal NSCLC pipeline that integrates Radiogenomics patient data and CT-ORG-based anatomical alignment, constructs organ-level representations, applies fixed transformer-style fusion and graph reasoning, and trains an explanation-guided prediction model for survival and recurrence tasks. It also exports deployable inference artifacts, cohort-level and patient-level visualizations, and a research-style explanation heatmap.
 
-3) **Recommended interpretation materials**
-   - cross-attn weights: which tokens each organ relied on (RNA/imaging/clinical/semantics)
-   - graph attention/edge visualization: highest-contributing edges
+The current repository does not yet support the stronger claim that the transformer fusion and graph reasoner were themselves learned end-to-end from supervision.
 
----
+## 9. If you want to run the project in stage order
 
-## 16. Minimal runnable MVP (suggested implementation order)
+The current logical order is:
 
-1) **Radiogenomics (211)**: CT + tumor SEG + clinical → OS/recurrence baseline  
-2) **Add RNA subset (130)**: RNA encoder + cross-attn (organ segmentation optional at this stage)  
-3) **Bring in CT-ORG**: train organ segmenter; add lung/bone/liver organ imaging tokens (enhanced version)
+1. `prepare_clean/total_table.py`
+2. `prepare_clean/label_construction_time_zero.py`
+3. `prepare_clean/imaging_preprocessing.py`
+4. `5.2_stage5_tumor_mask_provider_batch.py`
+5. `6.1_unet.py`
+6. `6.2_infer_mask.py`
+7. `7.1_rna_alignment.py`
+8. `7.2_rna_encoder.py`
+9. `7.3_immune_token.py`
+10. `8.1_clinical_feature_engineering.py`
+11. `8.2_ehr_encoder.py`
+12. `9.1_organ_tokenization.py`
+13. `10.1_multimodal_fusion.py`
+14. `11.1_graph_construction.py`
+15. `11.2_graph_reasoning.py`
+16. `12.1_primary_outputs.py`
+17. `12.2_explanation_outputs.py`
+18. `12.2_explanation_training.py`
+19. `13.1_phase3_baseline.py`
+20. `13.2_phase4_rna_finetune.py`
+21. `13.2_tune_phase4.py`
+22. `13.3_compare_phases.py`
+23. `13.4_visualize_diffusion.py`
+24. `13.5_result_heatmap.py`
+25. `15.1_case_inputs.py`
+26. `15.2_system_outputs.py`
+27. `15.3_run_inference_bundle.py`
+28. `15.4_external_case_inference.py`
+
+This order reflects the implemented repository, not the older aspirational plan.

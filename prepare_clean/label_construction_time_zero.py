@@ -6,24 +6,21 @@ import csv
 from datetime import datetime, date
 from pathlib import Path
 
-
 PRIMARY_INPUT_CLINICAL = Path("output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
 LEGACY_INPUT_CLINICAL = Path("data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
 OUTPUT_LABELS = Path("output/labels_time_zero.csv")
 
 MISSING = {"", "n/a", "na", "not collected", "not recorded in database", "null"}
 
-
 def clean(value):
-    """English documentation for function `clean`."""
+
     if value is None:
         return ""
     text = value.strip()
     return "" if text.lower() in MISSING else text
 
-
 def resolve_input_path(primary_path, fallback_path, label):
-    """English documentation for function `resolve_input_path`."""
+
     if primary_path.exists():
         return primary_path
     if fallback_path.exists():
@@ -32,9 +29,8 @@ def resolve_input_path(primary_path, fallback_path, label):
         f"{label} not found in either '{primary_path}' or '{fallback_path}'"
     )
 
-
 def parse_date(value):
-    """English documentation for function `parse_date`."""
+
     text = clean(value)
     if not text:
         return None
@@ -45,9 +41,8 @@ def parse_date(value):
             pass
     return None
 
-
 def day_diff(start, end):
-    """English documentation for function `day_diff`."""
+
     if start is None or end is None:
         return None
     d = (end - start).days
@@ -55,9 +50,8 @@ def day_diff(start, end):
         return None
     return d
 
-
 def build_rows(clinical_path):
-    """English documentation for function `build_rows`."""
+
     rows = []
     with clinical_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -67,7 +61,6 @@ def build_rows(clinical_path):
             last_alive = parse_date(r.get("Date of Last Known Alive"))
             death = parse_date(r.get("Date of Death"))
             recurrence_date = parse_date(r.get("Date of Recurrence"))
-
 
             survival = clean(r.get("Survival Status")).lower()
             if survival == "dead":
@@ -83,7 +76,6 @@ def build_rows(clinical_path):
                 os_label_known = 0
                 os_anchor = None
             time_os = day_diff(t0, os_anchor)
-
 
             rec = clean(r.get("Recurrence")).lower()
             rec_location = clean(r.get("Recurrence Location")).lower()
@@ -126,9 +118,8 @@ def build_rows(clinical_path):
     rows.sort(key=lambda x: str(x["patient_id"]))
     return rows
 
-
 def write_rows(rows):
-    """English documentation for function `write_rows`."""
+
     if not rows:
         raise RuntimeError("No label rows generated.")
     OUTPUT_LABELS.parent.mkdir(parents=True, exist_ok=True)
@@ -152,7 +143,6 @@ def write_rows(rows):
         writer.writeheader()
         writer.writerows(rows)
 
-
 def main():
 
     clinical_path = resolve_input_path(
@@ -168,7 +158,6 @@ def main():
     print(f"rows: {n}")
     print(f"os_label_known: {sum(int(r['os_label_known']) for r in rows)}")
     print(f"rec_label_known: {sum(int(r['rec_label_known']) for r in rows)}")
-
 
 if __name__ == "__main__":
     main()

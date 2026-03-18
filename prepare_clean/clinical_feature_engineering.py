@@ -1,4 +1,3 @@
-"""Build Stage 8.1 clinical features from the radiogenomics clinical table."""
 import argparse
 import csv
 import json
@@ -9,7 +8,6 @@ try:
     import numpy as np
 except Exception:
     np = None
-
 
 PRIMARY_CLINICAL_CSV = Path("output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
 FALLBACK_CLINICAL_CSV = Path("data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
@@ -51,17 +49,15 @@ DEFAULT_CONTINUOUS_COLUMNS = [
     "%GG",
 ]
 
-
 def check_dependencies():
-    """English documentation for function `check_dependencies`."""
+
     missing = []
     if np is None:
         missing.append("numpy")
     return missing
 
-
 def resolve_input_path(primary_path, fallback_path, label):
-    """English documentation for function `resolve_input_path`."""
+
     if primary_path.exists():
         return primary_path
     if fallback_path.exists():
@@ -70,14 +66,12 @@ def resolve_input_path(primary_path, fallback_path, label):
         f"{label} not found in either '{primary_path}' or '{fallback_path}'"
     )
 
-
 def ensure_output_dir(output_root):
-    """English documentation for function `ensure_output_dir`."""
+
     output_root.mkdir(parents=True, exist_ok=True)
 
-
 def normalize_missing_text(value):
-    """English documentation for function `normalize_missing_text`."""
+
     if value is None:
         return ""
     text = str(value).strip()
@@ -87,18 +81,16 @@ def normalize_missing_text(value):
         return ""
     return text
 
-
 def canonical_category(value):
-    """English documentation for function `canonical_category`."""
+
     text = normalize_missing_text(value)
     if not text:
         return "__MISSING__"
     text = re.sub(r"\s+", " ", text.strip().lower())
     return text
 
-
 def parse_numeric(value):
-    """English documentation for function `parse_numeric`."""
+
     text = normalize_missing_text(value)
     if not text:
         return None
@@ -120,15 +112,13 @@ def parse_numeric(value):
     except Exception:
         return None
 
-
 def safe_feature_token(text):
-    """English documentation for function `safe_feature_token`."""
+
     token = re.sub(r"[^0-9a-zA-Z_]+", "_", str(text)).strip("_")
     return token if token else "empty"
 
-
 def make_unique_feature_names(feature_names):
-    """English documentation for function `make_unique_feature_names`."""
+
     out = []
     seen = {}
     for name in feature_names:
@@ -140,9 +130,8 @@ def make_unique_feature_names(feature_names):
         out.append(f"{name}__dup{seen[name]}")
     return out
 
-
 def load_clinical_rows(clinical_csv_path):
-    """English documentation for function `load_clinical_rows`."""
+
     with clinical_csv_path.open(encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         header = list(reader.fieldnames or [])
@@ -156,9 +145,8 @@ def load_clinical_rows(clinical_csv_path):
         raise RuntimeError(f"clinical csv missing required column: {PATIENT_ID_COL}")
     return header, patient_to_row
 
-
 def load_manifest_patient_ids(manifest_csv_path):
-    """English documentation for function `load_manifest_patient_ids`."""
+
     if not manifest_csv_path.exists():
         return []
 
@@ -173,9 +161,8 @@ def load_manifest_patient_ids(manifest_csv_path):
                 ids.append(pid)
     return ids
 
-
 def choose_patient_ids(patient_to_row, manifest_patient_ids, use_manifest_filter, max_patients):
-    """English documentation for function `choose_patient_ids`."""
+
     if max_patients < 0:
         raise RuntimeError("max_patients must be >= 0")
 
@@ -188,9 +175,8 @@ def choose_patient_ids(patient_to_row, manifest_patient_ids, use_manifest_filter
         patient_ids = patient_ids[: min(max_patients, len(patient_ids))]
     return patient_ids
 
-
 def resolve_feature_columns(header, continuous_columns):
-    """English documentation for function `resolve_feature_columns`."""
+
     continuous_cols = []
     missing_cont_cols = []
     for col in continuous_columns:
@@ -213,9 +199,8 @@ def resolve_feature_columns(header, continuous_columns):
 
     return continuous_cols, categorical_cols, missing_cont_cols
 
-
 def build_continuous_features(patient_rows, continuous_cols, drop_constant_features):
-    """English documentation for function `build_continuous_features`."""
+
     n = len(patient_rows)
     c = len(continuous_cols)
     if c == 0:
@@ -305,9 +290,8 @@ def build_continuous_features(patient_rows, continuous_cols, drop_constant_featu
     x = np.concatenate(feature_parts, axis=1).astype(np.float32)
     return x, feature_names, stats_rows, kept_cols, dropped_cols
 
-
 def build_categorical_onehot_features(patient_rows, categorical_cols, drop_constant_features):
-    """English documentation for function `build_categorical_onehot_features`."""
+
     n = len(patient_rows)
     if len(categorical_cols) == 0:
         return (
@@ -362,9 +346,8 @@ def build_categorical_onehot_features(patient_rows, categorical_cols, drop_const
     x = np.concatenate(feature_parts, axis=1).astype(np.float32)
     return x, feature_names, vocab_rows, kept_cols, dropped_cols
 
-
 def build_categorical_index_features(patient_rows, categorical_cols, drop_constant_features):
-    """English documentation for function `build_categorical_index_features`."""
+
     n = len(patient_rows)
     if len(categorical_cols) == 0:
         return (
@@ -421,17 +404,15 @@ def build_categorical_index_features(patient_rows, categorical_cols, drop_consta
     x = np.concatenate(feature_parts, axis=1).astype(np.float32)
     return x, feature_names, vocab_rows, kept_cols, dropped_cols
 
-
 def write_csv(path, fieldnames, rows):
-    """English documentation for function `write_csv`."""
+
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
-
 def write_x_ehr_csv(path, patient_ids, feature_names, x_ehr):
-    """English documentation for function `write_x_ehr_csv`."""
+
     fieldnames = ["patient_id"] + list(feature_names)
     rows = []
     for i, pid in enumerate(patient_ids):
@@ -441,15 +422,13 @@ def write_x_ehr_csv(path, patient_ids, feature_names, x_ehr):
         rows.append(row)
     write_csv(path, fieldnames, rows)
 
-
 def write_summary_json(path, summary):
-    """English documentation for function `write_summary_json`."""
+
     with path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-
 def parse_args():
-    """English documentation for function `parse_args`."""
+
     parser = argparse.ArgumentParser(
         description="Stage 8.1 Clinical feature engineering: clinical.csv -> x_ehr",
         allow_abbrev=False,
@@ -491,9 +470,8 @@ def parse_args():
         print(f"ignore_unknown_args: {unknown}")
     return args
 
-
 def main():
-    """English documentation for function `main`."""
+
     args = parse_args()
     missing = check_dependencies()
     if missing:
@@ -670,7 +648,6 @@ def main():
     print(f"wrote: {out_summary_json}")
     print(f"x_ehr_shape: {tuple(x_ehr.shape)}")
     print("complete")
-
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,3 @@
-"""Build the patient manifest with modality availability and label-related fields."""
 
 from __future__ import annotations
 
@@ -7,7 +6,6 @@ import re
 from collections import defaultdict
 from datetime import datetime, date
 from pathlib import Path
-
 
 DATA_DIR = Path("data")
 OUTPUT_CLEAN_DIR = Path("output") / "clean_data"
@@ -21,9 +19,8 @@ OUTPUT_CSV = Path("output") / "patient_manifest.csv"
 
 MISSING_STRINGS = {"", "n/a", "na", "not collected", "not recorded in database", "null",}
 
-
 def normalize_missing(value):
-    """English documentation for function `normalize_missing`."""
+
     if value is None:
         return ""
     cleaned = value.strip()
@@ -31,9 +28,8 @@ def normalize_missing(value):
         return ""
     return cleaned
 
-
 def resolve_input_path(primary_path, fallback_path, label):
-    """English documentation for function `resolve_input_path`."""
+
     if primary_path.exists():
         return primary_path
     if fallback_path.exists():
@@ -42,9 +38,8 @@ def resolve_input_path(primary_path, fallback_path, label):
         f"{label} not found in either '{primary_path}' or '{fallback_path}'"
     )
 
-
 def parse_date(value):
-    """English documentation for function `parse_date`."""
+
     cleaned = normalize_missing(value)
     if not cleaned:
         return None
@@ -55,9 +50,8 @@ def parse_date(value):
             pass
     return None
 
-
 def days_between(start, end):
-    """English documentation for function `days_between`."""
+
     if start is None or end is None:
         return None
     delta = (end - start).days
@@ -65,9 +59,8 @@ def days_between(start, end):
         return None
     return delta
 
-
 def load_modality_flags():
-    """English documentation for function `load_modality_flags`."""
+
     flags = defaultdict(
         lambda: {
             "has_ct": 0,
@@ -92,18 +85,16 @@ def load_modality_flags():
                 flags[pid]["has_seg"] = 1
     return flags
 
-
 def load_aim_cases():
-    """English documentation for function `load_aim_cases`."""
+
     out = set()
     for xml_file in AIM_DIR.glob("*.xml"):
         case_id = re.sub(r"v\d+$", "", xml_file.stem)
         out.add(case_id)
     return out
 
-
 def load_rna_mapping(series_matrix_path):
-    """English documentation for function `load_rna_mapping`."""
+
     case_to_gsm = {}
     sample_titles = None
     sample_geo = None
@@ -125,9 +116,8 @@ def load_rna_mapping(series_matrix_path):
 
     return case_to_gsm
 
-
 def build_patient_manifest(clinical_csv_path, series_matrix_path):
-    """English documentation for function `build_patient_manifest`."""
+
     modality_flags = load_modality_flags()
     aim_cases = load_aim_cases()
     case_to_gsm = load_rna_mapping(series_matrix_path)
@@ -205,9 +195,8 @@ def build_patient_manifest(clinical_csv_path, series_matrix_path):
     output_rows.sort(key=lambda x: str(x["patient_id"]))
     return output_rows
 
-
 def write_manifest(rows):
-    """English documentation for function `write_manifest`."""
+
     if not rows:
         raise RuntimeError("No rows generated for patient manifest")
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -238,9 +227,8 @@ def write_manifest(rows):
         writer.writeheader()
         writer.writerows(rows)
 
-
 def print_summary(rows):
-    """English documentation for function `print_summary`."""
+
     n = len(rows)
     has = lambda col: sum(1 for r in rows if int(r[col]) == 1)
     print(f"wrote: {OUTPUT_CSV}")
@@ -253,9 +241,8 @@ def print_summary(rows):
     print(f"os_label_known: {has('os_label_known')}")
     print(f"rec_label_known: {has('rec_label_known')}")
 
-
 def main():
-    """English documentation for function `main`."""
+
     clinical_csv_path = resolve_input_path(
         PRIMARY_CLINICAL_CSV,
         LEGACY_CLINICAL_CSV,
@@ -271,7 +258,6 @@ def main():
     rows = build_patient_manifest(clinical_csv_path, series_matrix_path)
     write_manifest(rows)
     print_summary(rows)
-
 
 if __name__ == "__main__":
     main()

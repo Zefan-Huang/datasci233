@@ -1,4 +1,3 @@
-"""Align GEO RNA samples to patient IDs and build patient-level RNA matrices."""
 import argparse
 import csv
 import json
@@ -8,7 +7,6 @@ try:
     import numpy as np
 except Exception:
     np = None
-
 
 PRIMARY_SERIES_MATRIX = Path("output/clean_data/GSE103584_series_matrix.txt")
 FALLBACK_SERIES_MATRIX = Path("data/GSE103584_series_matrix.txt")
@@ -21,31 +19,27 @@ FALLBACK_MANIFEST = Path("output/clean_data/patient_manifest.csv")
 
 DEFAULT_OUTPUT_ROOT = Path("output/stage7/7.1_rna_alignment")
 
-
 def check_dependencies():
-    """English documentation for function `check_dependencies`."""
+
     missing = []
     if np is None:
         missing.append("numpy")
     return missing
 
-
 def resolve_input_path(primary_path, fallback_path):
-    """English documentation for function `resolve_input_path`."""
+
     if primary_path.exists():
         return primary_path
     if fallback_path.exists():
         return fallback_path
     raise FileNotFoundError(f"input file not found: {primary_path} | {fallback_path}")
 
-
 def ensure_output_dir(output_root):
-    """English documentation for function `ensure_output_dir`."""
+
     output_root.mkdir(parents=True, exist_ok=True)
 
-
 def parse_series_matrix_mapping(series_matrix_path):
-    """English documentation for function `parse_series_matrix_mapping`."""
+
     sample_titles = None
     sample_geo = None
     quote = chr(34)
@@ -76,9 +70,8 @@ def parse_series_matrix_mapping(series_matrix_path):
         "duplicate_gsm": duplicate_gsm,
     }
 
-
 def load_manifest_patient_ids(manifest_csv_path):
-    """English documentation for function `load_manifest_patient_ids`."""
+
     if manifest_csv_path is None:
         return set()
     if not manifest_csv_path.exists():
@@ -95,18 +88,16 @@ def load_manifest_patient_ids(manifest_csv_path):
                 out.add(patient_id)
     return out
 
-
 def parse_expression_header(expr_tsv_path):
-    """English documentation for function `parse_expression_header`."""
+
     with expr_tsv_path.open(encoding="utf-8") as f:
         header = f.readline().rstrip("\n").split("\t")
     if len(header) < 2:
         raise RuntimeError("expression header is invalid")
     return header[1:]
 
-
 def build_selected_columns(header_gsms, gsm_to_patient, manifest_patient_ids, use_manifest_filter, max_patients):
-    """English documentation for function `build_selected_columns`."""
+
     selected_columns = []
     patient_order = []
     patient_seen = set()
@@ -152,9 +143,8 @@ def build_selected_columns(header_gsms, gsm_to_patient, manifest_patient_ids, us
         "duplicate_patient_count": duplicate_patient_count,
     }
 
-
 def load_expression_matrix(expr_tsv_path, selected_columns):
-    """English documentation for function `load_expression_matrix`."""
+
     selected_sample_indices = [x["sample_col_index"] for x in selected_columns]
     selected_file_indices = [i + 1 for i in selected_sample_indices]
 
@@ -202,9 +192,8 @@ def load_expression_matrix(expr_tsv_path, selected_columns):
     matrix_gene_by_col = np.asarray(rows, dtype=np.float32)
     return gene_ids, matrix_gene_by_col, bad_value_count
 
-
 def aggregate_to_patient_matrix(matrix_gene_by_col, patient_order, patient_to_col_positions):
-    """English documentation for function `aggregate_to_patient_matrix`."""
+
     gene_count = int(matrix_gene_by_col.shape[0])
     patient_count = len(patient_order)
     out = np.zeros((patient_count, gene_count), dtype=np.float32)
@@ -220,9 +209,8 @@ def aggregate_to_patient_matrix(matrix_gene_by_col, patient_order, patient_to_co
 
     return out
 
-
 def build_x_rna_log1p_zscore(patient_by_gene):
-    """English documentation for function `build_x_rna_log1p_zscore`."""
+
     clipped = np.maximum(patient_by_gene, 0.0)
     log1p_matrix = np.log1p(clipped)
 
@@ -239,24 +227,21 @@ def build_x_rna_log1p_zscore(patient_by_gene):
 
     return x_rna, gene_mean.astype(np.float32), gene_std.astype(np.float32)
 
-
 def write_sample_manifest_csv(path, selected_columns):
-    """English documentation for function `write_sample_manifest_csv`."""
+
     fieldnames = ["sample_col_index", "gsm_id", "patient_id"]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(selected_columns)
 
-
 def write_summary_json(path, summary):
-    """English documentation for function `write_summary_json`."""
+
     with path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
-
 def parse_args():
-    """English documentation for function `parse_args`."""
+
     parser = argparse.ArgumentParser(
         description="Stage 7.1 RNA alignment: GEO -> PatientID and x_rna generation.",
         allow_abbrev=False,
@@ -281,9 +266,8 @@ def parse_args():
         print(f"ignore_unknown_args: {unknown}")
     return args
 
-
 def main():
-    """English documentation for function `main`."""
+
     args = parse_args()
     missing = check_dependencies()
     if missing:
@@ -397,7 +381,6 @@ def main():
     print(f"selected_patients: {len(patient_order)}")
     print(f"genes: {len(gene_ids)}")
     print("complete")
-
 
 if __name__ == "__main__":
     main()

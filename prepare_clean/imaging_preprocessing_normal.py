@@ -1,11 +1,9 @@
-"""Compatibility entrypoint for imaging preprocessing in IDE environments."""
 import argparse
 
 from imaging_preprocessing import run_pipeline
 
-
 def parse_args():
-    """English documentation for function `parse_args`."""
+
     parser = argparse.ArgumentParser(description="Run imaging preprocessing (pydevconsole-safe).")
     parser.add_argument(
         "--max-cases",
@@ -16,12 +14,10 @@ def parse_args():
     args, _unknown = parser.parse_known_args()
     return args
 
-
 def main():
-    """English documentation for function `main`."""
+
     args = parse_args()
     run_pipeline(args.max_cases)
-
 
 if __name__ == "__main__":
     main()

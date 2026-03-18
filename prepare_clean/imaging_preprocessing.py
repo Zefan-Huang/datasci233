@@ -1,4 +1,3 @@
-"""Run imaging preprocessing, tumor ROI extraction, and semantic token preparation."""
 import argparse
 import csv
 import hashlib
@@ -23,7 +22,6 @@ try:
 except Exception:
     ndimage = None
 
-
 DATA_DIR = Path("data")
 OUTPUT_DIR = Path("output")
 PATIENT_MANIFEST_CSV = OUTPUT_DIR / "patient_manifest.csv"
@@ -45,16 +43,14 @@ SEMANTIC_TOKEN_DIM = 64
 ROI_TOKEN_DIM = 64
 ROI_MARGIN = 4
 
-
 def ensure_output_dirs():
-    """English documentation for function `ensure_output_dirs`."""
+
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     OUTPUT_CT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_SEG_DIR.mkdir(parents=True, exist_ok=True)
 
-
 def check_imaging_dependencies():
-    """English documentation for function `check_imaging_dependencies`."""
+
     deps = {"ready": False, "missing": [], "np": None, "pydicom": None, "ndimage": None}
     try:
         import numpy as np
@@ -78,9 +74,8 @@ def check_imaging_dependencies():
     deps["ready"] = len(deps["missing"]) == 0
     return deps
 
-
 def load_patient_ids():
-    """English documentation for function `load_patient_ids`."""
+
     manifest_path = PATIENT_MANIFEST_CSV if PATIENT_MANIFEST_CSV.exists() else LEGACY_PATIENT_MANIFEST_CSV
     patient_ids = []
     with manifest_path.open(encoding="utf-8", newline="") as f:
@@ -89,9 +84,8 @@ def load_patient_ids():
             patient_ids.append(row["patient_id"].strip())
     return patient_ids
 
-
 def load_metadata_rows():
-    """English documentation for function `load_metadata_rows`."""
+
     rows = []
     with METADATA_CSV.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -99,9 +93,8 @@ def load_metadata_rows():
             rows.append(row)
     return rows
 
-
 def build_series_index(metadata_rows):
-    """English documentation for function `build_series_index`."""
+
     index = {}
     for row in metadata_rows:
         if row.get("Collection") != "NSCLC Radiogenomics":
@@ -114,9 +107,8 @@ def build_series_index(metadata_rows):
         index[pid].append(row)
     return index
 
-
 def score_ct_series(series_description, num_images):
-    """English documentation for function `score_ct_series`."""
+
     desc = (series_description or "").lower()
     score = 0
     if "chest" in desc or "thorax" in desc or "lung" in desc:
@@ -132,17 +124,15 @@ def score_ct_series(series_description, num_images):
     score += min(int(num_images / 100), 5)
     return score
 
-
 def resolve_series_dir(file_location):
-    """English documentation for function `resolve_series_dir`."""
+
     rel = (file_location or "").strip()
     if rel.startswith("./"):
         rel = rel[2:]
     return RADIOGENOMICS_ROOT / rel
 
-
 def pick_primary_ct_series(patient_id, series_index):
-    """English documentation for function `pick_primary_ct_series`."""
+
     candidates = []
     for row in series_index.get(patient_id, []):
         if (row.get("Modality") or "").strip() != "CT":
@@ -158,9 +148,8 @@ def pick_primary_ct_series(patient_id, series_index):
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return candidates[0][2]
 
-
 def pick_seg_series(patient_id, series_index):
-    """English documentation for function `pick_seg_series`."""
+
     seg_rows = []
     for row in series_index.get(patient_id, []):
         if (row.get("Modality") or "").strip() == "SEG":
@@ -171,9 +160,8 @@ def pick_seg_series(patient_id, series_index):
     seg_rows.sort(key=lambda x: x[0], reverse=True)
     return seg_rows[0][1]
 
-
 def find_aim_file(patient_id):
-    """English documentation for function `find_aim_file`."""
+
     direct = AIM_DIR / f"{patient_id}.xml"
     if direct.exists():
         return str(direct)
@@ -182,18 +170,16 @@ def find_aim_file(patient_id):
         return str(candidates[0])
     return ""
 
-
 def normalize_vector(vec, np):
-    """English documentation for function `normalize_vector`."""
+
     arr = np.asarray(vec, dtype="float64")
     norm = float(np.linalg.norm(arr))
     if norm <= 0:
         return None
     return arr / norm
 
-
 def extract_segment_numbers(seg_ds):
-    """English documentation for function `extract_segment_numbers`."""
+
     keywords = ("tumor", "tumour", "lesion", "gtv", "target", "mass", "nodule", "primary")
     all_segments = set()
     tumor_segments = set()
@@ -220,17 +206,15 @@ def extract_segment_numbers(seg_ds):
         return tumor_segments, all_segments
     return all_segments, all_segments
 
-
 def frame_segment_number(frame_fg):
-    """English documentation for function `frame_segment_number`."""
+
     seg_ident = getattr(frame_fg, "SegmentIdentificationSequence", [])
     if not seg_ident:
         return None
     return int(getattr(seg_ident[0], "ReferencedSegmentNumber", 0)) or None
 
-
 def frame_referenced_sop_uid(frame_fg):
-    """English documentation for function `frame_referenced_sop_uid`."""
+
     deriv = getattr(frame_fg, "DerivationImageSequence", [])
     for deriv_item in deriv:
         source_seq = getattr(deriv_item, "SourceImageSequence", [])
@@ -240,9 +224,8 @@ def frame_referenced_sop_uid(frame_fg):
                 return sop_uid
     return ""
 
-
 def frame_image_position(frame_fg):
-    """English documentation for function `frame_image_position`."""
+
     plane_pos = getattr(frame_fg, "PlanePositionSequence", [])
     if not plane_pos:
         return None
@@ -254,9 +237,8 @@ def frame_image_position(frame_fg):
     except Exception:
         return None
 
-
 def load_ct_volume_and_normalize(ct_series_dir, deps):
-    """English documentation for function `load_ct_volume_and_normalize`."""
+
     if not deps["ready"]:
         return {"status": "blocked_missing_dependency", "error": ",".join(deps["missing"])}
 
@@ -400,9 +382,8 @@ def load_ct_volume_and_normalize(ct_series_dir, deps):
         "ct_geometry": ct_geometry,
     }
 
-
 def load_tumor_mask(seg_series_dir, ct_shape, ct_geometry, deps):
-    """English documentation for function `load_tumor_mask`."""
+
     if not deps["ready"]:
         return {"status": "blocked_missing_dependency", "error": ",".join(deps["missing"])}
     if seg_series_dir is None:
@@ -587,9 +568,8 @@ def load_tumor_mask(seg_series_dir, ct_shape, ct_geometry, deps):
         "seg_frame_count": seg_frame_count,
     }
 
-
 def compute_roi_token(volume_norm, tumor_mask, deps):
-    """English documentation for function `compute_roi_token`."""
+
     if not deps["ready"]:
         return {"status": "blocked_missing_dependency", "error": ",".join(deps["missing"])}
 
@@ -641,9 +621,8 @@ def compute_roi_token(volume_norm, tumor_mask, deps):
         token = token / norm
     return {"status": "ok", "token": token.tolist()}
 
-
 def parse_aim_feature_texts(aim_xml_path):
-    """English documentation for function `parse_aim_feature_texts`."""
+
     if not aim_xml_path:
         return []
     try:
@@ -665,9 +644,8 @@ def parse_aim_feature_texts(aim_xml_path):
             features.append(f"text:{text}")
     return features
 
-
 def build_semantic_token(feature_texts, token_dim):
-    """English documentation for function `build_semantic_token`."""
+
     if not feature_texts:
         return []
     vec = [0.0 for _ in range(token_dim)]
@@ -691,9 +669,8 @@ def build_semantic_token(feature_texts, token_dim):
         vec = [v / norm for v in vec]
     return vec
 
-
 def save_ct_npz(patient_id, ct_result, deps):
-    """English documentation for function `save_ct_npz`."""
+
     np = deps["np"]
     out_path = OUTPUT_CT_DIR / f"{patient_id}.npz"
     np.savez_compressed(
@@ -703,17 +680,15 @@ def save_ct_npz(patient_id, ct_result, deps):
     )
     return str(out_path)
 
-
 def save_seg_npz(patient_id, mask, deps):
-    """English documentation for function `save_seg_npz`."""
+
     np = deps["np"]
     out_path = OUTPUT_SEG_DIR / f"{patient_id}.npz"
     np.savez_compressed(out_path, mask=mask.astype("uint8"))
     return str(out_path)
 
-
 def process_patient(patient_id, series_index, deps):
-    """English documentation for function `process_patient`."""
+
     ct_row = pick_primary_ct_series(patient_id, series_index)
     seg_row = pick_seg_series(patient_id, series_index)
     aim_xml = find_aim_file(patient_id)
@@ -755,7 +730,6 @@ def process_patient(patient_id, series_index, deps):
         summary["semantic_status"] = "aim_missing_or_empty"
         summary["semantic_token_dim"] = 0
 
-
     ct_result = None
     if ct_row is None:
         summary["ct_status"] = "ct_series_not_found"
@@ -767,7 +741,6 @@ def process_patient(patient_id, series_index, deps):
         if ct_result["status"] == "ok":
             summary["ct_shape_norm"] = "x".join(str(x) for x in ct_result["volume_norm"].shape)
             summary["ct_norm_npz"] = save_ct_npz(patient_id, ct_result, deps)
-
 
     seg_result = None
     if seg_row is None:
@@ -800,7 +773,6 @@ def process_patient(patient_id, series_index, deps):
                 if source_shape:
                     summary["seg_source_shape"] = "x".join(str(v) for v in source_shape)
 
-
     if ct_result is None or ct_result.get("status") != "ok":
         summary["roi_token_status"] = "blocked_ct_unavailable"
     elif seg_result is None or seg_result.get("status") != "ok":
@@ -815,17 +787,15 @@ def process_patient(patient_id, series_index, deps):
 
     return {"summary": summary, "semantic_row": semantic_row, "roi_row": roi_row}
 
-
 def write_csv(path, fieldnames, rows):
-    """English documentation for function `write_csv`."""
+
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
-
 def run_pipeline(max_cases):
-    """English documentation for function `run_pipeline`."""
+
     ensure_output_dirs()
     deps = check_imaging_dependencies()
     patient_ids = load_patient_ids()
@@ -901,9 +871,8 @@ def run_pipeline(max_cases):
     if not deps["ready"]:
         print(f"warning_missing_dependencies: {','.join(deps['missing'])}")
 
-
 def parse_args():
-    """English documentation for function `parse_args`."""
+
     parser = argparse.ArgumentParser(description="Run imaging preprocessing pipeline (5.1~5.4).")
     parser.add_argument(
         "--max-cases",
@@ -913,12 +882,10 @@ def parse_args():
     )
     return parser.parse_args()
 
-
 def main():
-    """English documentation for function `main`."""
+
     args = parse_args()
     run_pipeline(args.max_cases)
-
 
 if __name__ == "__main__":
     main()

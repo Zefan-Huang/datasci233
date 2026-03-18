@@ -2,7 +2,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent
-OUTPUT_PATH = ROOT / "report_assets" / "academic_architecture_transformer_gnn_joint.svg"
+OUTPUT_PATH = ROOT / "key_outputs" / "academic_architecture_transformer_gnn_joint.svg"
 
 W, H = 2420, 910
 FAM = "'Helvetica Neue', Arial, sans-serif"

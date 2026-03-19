@@ -1,6 +1,0 @@
-src_name,dst_name,mean_edge_diffusion_prob
-Primary,Bone,0.587446890771389
-Primary,Liver,0.5162999182939529
-Primary,LymphNodeMediastinum,0.4231017231941223
-Primary,Lung,0.40093691647052765
-Primary,Brain,0.298060305416584

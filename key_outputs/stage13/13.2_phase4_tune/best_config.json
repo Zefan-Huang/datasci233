@@ -1,7 +1,0 @@
-{
-  "freeze_prefixes": "pool,base_trunk",
-  "lr": 0.0001,
-  "loss_weight_expl_rec": 0.5,
-  "loss_weight_expl_loc": 0.25,
-  "loss_weight_edge_prior": 0.05
-}

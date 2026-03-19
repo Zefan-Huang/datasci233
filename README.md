@@ -1,6 +1,6 @@
 # Multimodal Graph Reasoning for Implicit Metastasis Pathway Inference and Survival Prediction
 
-> **For the full methodology and results, see [1. REPORT.md](1.%20REPORT.md).**
+> **For the full methodology and results, see [Eyes_On_Me_Not_The_Code_Plz.md](Eyes_On_Me_Not_The_Code_Plz.md).**
 
 This repository contains a staged multimodal pipeline for non-small cell lung
 cancer (NSCLC) prediction and explanation built on two public datasets:
@@ -62,17 +62,18 @@ path.
 
 ## Key Output Locations
 
-- `key_outputs/stage12/12.1_primary_outputs_cv/`: cross-validation metrics
+- `key_outputs/stage12/12.1_primary_outputs_cv/`: cross-validation summary
+  metrics
 - `key_outputs/stage12/12.2_explanation_outputs_joint/`: joint explanation
-  CSV/JSON
+  summary files
 - `key_outputs/stage13/13.1_phase3_baseline/`: baseline phase summary
 - `key_outputs/stage13/13.2_phase4_tune/`: tuned final result summaries
 - `key_outputs/` and `key_outputs/stage13/13.4_visualize_diffusion/`: curated
-  cohort diffusion SVG, selected patient SVGs, and visualization summaries
+  cohort diffusion SVG, selected patient SVGs, and visualization summary
 - `key_outputs/stage13/13.5_result_heatmap/`: paired Organ x Patient heatmap
-  exports
+  figure exports
 - `key_outputs/stage15/15.4_external_case_inference_smoke_R01-003_no_rna/`:
-  representative external-case inference bundle outputs
+  representative external-case inference summary artifacts
 
 ## Current Research Figure
 
@@ -89,7 +90,7 @@ order.
 ## Documentation
 
 - `project.md`: full project design and staged pipeline description
-- `REPORT.md`: report-style summary of motivation, method, workflow, and
+- `Eyes_On_Me_Not_The_Code_Plz.md`: report-style summary of motivation, method, workflow, and
   results
 - `prepare_clean/README.md`: notes for the data-preparation subdirectory
 

@@ -2,54 +2,29 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import numpy as np
+import pydicom
+import nibabel as nib
+from scipy import ndimage
 
-try:
-    import numpy as np
-except Exception:
-    np = None
 
-try:
-    import pydicom
-except Exception:
-    pydicom = None
-
-try:
-    import nibabel as nib
-except Exception:
-    nib = None
-
-try:
-    from scipy import ndimage
-except Exception:
-    ndimage = None
+## still cleaning the dataset, but it's final clean, after this i will do the model part
+## main thing i did: Iterate through all patients, determining which ones to process based on the manifest or metadata.csv.
 
 try:
     import pydicom_seg
-except Exception:
+except ImportError:
     pydicom_seg = None
 
 try:
     import highdicom
-except Exception:
+except ImportError:
     highdicom = None
 
 
 SEG_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.66.4"
 LPS_TO_RAS = np.diag([-1.0, -1.0, 1.0, 1.0]) if np is not None else None
 TUMOR_KEYWORDS = ("tumor", "tumour", "lesion", "gtv", "target", "mass", "nodule", "primary")
-
-
-def check_required_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    if pydicom is None:
-        missing.append("pydicom")
-    if nib is None:
-        missing.append("nibabel")
-    if ndimage is None:
-        missing.append("scipy")
-    return missing
 
 
 def ensure_output_dir(output_dir):
@@ -928,13 +903,6 @@ def choose_segment_for_patient(patient_id, segment_map, default_segment_number, 
 
 def run_batch():
     args = parse_args()
-    missing = check_required_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy pydicom nibabel scipy"
-        )
 
     if args.max_cases < 0:
         raise SystemExit("--max-cases must be >= 0 (0 means all cases)")

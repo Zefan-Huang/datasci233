@@ -4,33 +4,13 @@ import csv
 import json
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
+import scipy.ndimage as ndimage
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-try:
-    import scipy.ndimage as ndimage
-except Exception:
-    ndimage = None
-
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-except Exception:
-    torch = None
-    nn = None
-    F = None
-
-if nn is None:
-    class _NNPlaceholder:
-
-
-        Module = object
-
-    nn = _NNPlaceholder()
-
+# put the weight from 6.1 and apply it into the real patient, some people has missing mask and some doesn't
 
 DEFAULT_CT_DIR = Path("output/preprocessed/ct_norm")
 DEFAULT_EXPERIMENT_ROOT = Path("output/experiments/organ_seg")
@@ -44,18 +24,6 @@ DEFAULT_ORGAN_NAME_MAP = {
     5: "bone",
     6: "brain",
 }
-
-
-def check_dependencies():
-
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    if ndimage is None:
-        missing.append("scipy")
-    if torch is None or nn is None:
-        missing.append("torch")
-    return missing
 
 
 def ensure_output_dirs(output_root, mask_dir):
@@ -451,14 +419,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        miss = ",".join(missing)
-        raise SystemExit(
-            "missing dependency: "
-            + miss
-            + ". install example: .venv/bin/pip install numpy scipy torch"
-        )
 
     run_tag = args.run_tag.strip()
     if not run_tag:

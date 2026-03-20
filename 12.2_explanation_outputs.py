@@ -5,10 +5,7 @@ import math
 from collections import Counter
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
 
 
 DEFAULT_GRAPH_REASONING_PACK = Path("output/stage11/11.2_graph_reasoning/graph_reasoning_pack.npz")
@@ -27,12 +24,6 @@ EXPLANATION_SEMANTICS = (
     "for OS/recurrence predictions and do not imply organ-level ground-truth supervision."
 )
 
-
-def check_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    return missing
 
 
 def resolve_required_path(path_arg, default_path, label):
@@ -415,13 +406,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy"
-        )
     if args.top_k <= 0:
         raise SystemExit("--top-k must be > 0")
     if args.max_hops <= 0:

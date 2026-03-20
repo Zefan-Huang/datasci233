@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+## this is a key step, here I combine all the tokens from different models i made before. this is key to cross-attention
+## I also create the query, it should be random at this stage.
 
 ORGAN_NODE_NAMES = [
     "Primary",

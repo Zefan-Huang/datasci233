@@ -7,11 +7,9 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
 
+## data cleaning for the next step, basclly aligned everything into the same page
 
 DEFAULT_MANIFEST_CSV = Path("output/patient_manifest.csv")
 DEFAULT_STAGE6_TOKEN_CSV = Path("output/experiments/organ_seg/search_base24/infer/organ_imaging_tokens.csv")
@@ -39,12 +37,6 @@ STAGE6_ORGAN_TO_NODE = {
 }
 TOKEN_DIM_64_MODALITIES = ("t_img_nodes", "t_tumor", "t_sem", "t_imm")
 
-
-def check_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    return missing
 
 
 def ensure_output_dir(output_root):
@@ -401,13 +393,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy"
-        )
     if args.max_patients < 0:
         raise SystemExit("--max-patients must be >= 0 (0 means all manifest patients)")
 

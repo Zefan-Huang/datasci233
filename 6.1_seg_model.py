@@ -4,43 +4,17 @@ import json
 import random
 import re
 from pathlib import Path
+import numpy as np
+import scipy.ndimage as ndimage
+import nibabel as nib
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+from torch.utils.data import Subset
 
-try:
-    import numpy as np
-except Exception:
-    np = None
-
-try:
-    import scipy.ndimage as ndimage
-except Exception:
-    ndimage = None
-
-try:
-    import nibabel as nib
-except Exception:
-    nib = None
-
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-    from torch.utils.data import DataLoader
-    from torch.utils.data import Dataset
-    from torch.utils.data import Subset
-except Exception:
-    torch = None
-    nn = None
-    F = None
-    DataLoader = None
-    Subset = None
-    Dataset = object
-
-if nn is None:
-    class _NNPlaceholder:
-        Module = object
-
-    nn = _NNPlaceholder()
-
+## this file is to vectorize(make token) the image
 
 DEFAULT_ORGAN_DIR = Path("data/PKG - CT-ORG/CT-ORG/OrganSegmentations")
 DEFAULT_SAVE_DIR = Path("output/experiments/organ_seg")
@@ -55,18 +29,6 @@ DEFAULT_ORGAN_NAME_MAP = {
     6: "brain",
 }
 
-
-def check_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    if ndimage is None:
-        missing.append("scipy")
-    if nib is None:
-        missing.append("nibabel")
-    if torch is None or nn is None or F is None or DataLoader is None or Subset is None:
-        missing.append("torch")
-    return missing
 
 
 def resolve_run_paths(save_dir, run_tag):
@@ -639,15 +601,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        miss = ",".join(missing)
-        raise SystemExit(
-            "missing dependency: "
-            + miss
-            + ". install example: .venv/bin/pip install numpy scipy nibabel torch"
-        )
-
     run_tag = args.run_tag.strip()
     if not run_tag:
         raise SystemExit("--run-tag must not be empty")

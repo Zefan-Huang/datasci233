@@ -2,7 +2,7 @@
 import runpy
 from pathlib import Path
 
-
+## I did this in 6.1_seg_model.py so here just leave an access to run
 def main():
 
     seg_script = Path(__file__).with_name("6.1_seg_model.py")

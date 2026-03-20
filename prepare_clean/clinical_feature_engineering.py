@@ -4,10 +4,7 @@ import json
 import re
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
 
 PRIMARY_CLINICAL_CSV = Path("output/clean_data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
 FALLBACK_CLINICAL_CSV = Path("data/NSCLCR01Radiogenomic_DATA_LABELS_2018-05-22_1500-shifted.csv")
@@ -48,13 +45,6 @@ DEFAULT_CONTINUOUS_COLUMNS = [
     "Quit Smoking Year",
     "%GG",
 ]
-
-def check_dependencies():
-
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    return missing
 
 def resolve_input_path(primary_path, fallback_path, label):
 
@@ -473,14 +463,6 @@ def parse_args():
 def main():
 
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy"
-        )
-
     if args.max_patients < 0:
         raise SystemExit("--max-patients must be >= 0 (0 means all patients)")
 

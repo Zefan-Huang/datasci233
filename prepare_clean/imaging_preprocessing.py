@@ -7,20 +7,9 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-try:
-    import numpy as np
-except Exception:
-    np = None
-
-try:
-    import pydicom as pydicom
-except Exception:
-    pydicom = None
-
-try:
-    import scipy.ndimage as ndimage
-except Exception:
-    ndimage = None
+import numpy as np
+import pydicom as pydicom
+import scipy.ndimage as ndimage
 
 DATA_DIR = Path("data")
 OUTPUT_DIR = Path("output")
@@ -51,28 +40,7 @@ def ensure_output_dirs():
 
 def check_imaging_dependencies():
 
-    deps = {"ready": False, "missing": [], "np": None, "pydicom": None, "ndimage": None}
-    try:
-        import numpy as np
-    except Exception:
-        deps["missing"].append("numpy")
-        np = None
-    try:
-        import pydicom
-    except Exception:
-        deps["missing"].append("pydicom")
-        pydicom = None
-    try:
-        from scipy import ndimage
-    except Exception:
-        deps["missing"].append("scipy")
-        ndimage = None
-
-    deps["np"] = np
-    deps["pydicom"] = pydicom
-    deps["ndimage"] = ndimage
-    deps["ready"] = len(deps["missing"]) == 0
-    return deps
+    return {"ready": True, "missing": [], "np": np, "pydicom": pydicom, "ndimage": ndimage}
 
 def load_patient_ids():
 

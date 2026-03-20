@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+## GNN, important, making node and edges. I Only made 6 nodes: Primary; Lung; Bone; Liver; LymphNodeMediastinum; Brain
+## this is kinda my priori. Maybe i will do more nodes in the future depending on how good the results.
 
 DEFAULT_STAGE10_NPZ = Path("output/stage10/10.1_multimodal_fusion/fused_organ_tokens.npz")
 DEFAULT_OUTPUT_ROOT = Path("output/stage11/11.1_graph_construction")

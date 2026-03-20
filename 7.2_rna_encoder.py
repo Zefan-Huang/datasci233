@@ -4,41 +4,18 @@ import json
 import random
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset
 
-try:
-    import torch
-    import torch.nn as nn
-    from torch.utils.data import DataLoader
-    from torch.utils.data import TensorDataset
-except Exception:
-    torch = None
-    nn = None
-    DataLoader = None
-    TensorDataset = None
-
-if nn is None:
-    class _NNPlaceholder:
-        Module = object
-
-    nn = _NNPlaceholder()
-
+## using MLP to do encode RNA info
 
 PRIMARY_STAGE71_NPZ = Path("output/stage7/7.1_rna_alignment/x_rna_log1p_zscore.npz")
 FALLBACK_STAGE71_NPZ = Path("output/stage7/7.1_rna_alignment_smoke/x_rna_log1p_zscore.npz")
 DEFAULT_OUTPUT_ROOT = Path("output/stage7/7.2_rna_encoder")
 
-
-def check_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    if torch is None or DataLoader is None or TensorDataset is None:
-        missing.append("torch")
-    return missing
 
 
 def resolve_input_npz(path_arg):
@@ -467,14 +444,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy torch"
-        )
-
     if args.max_patients < 0:
         raise SystemExit("--max-patients must be >= 0 (0 means all patients)")
     if args.top_genes < 0:

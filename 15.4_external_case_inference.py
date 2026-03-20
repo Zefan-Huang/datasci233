@@ -4,19 +4,12 @@ import importlib.util
 import json
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
-
-try:
-    import torch
-except Exception:
-    torch = None
+import numpy as np
+import torch
 
 try:
     import nibabel as nib
-except Exception:
+except ImportError:
     nib = None
 
 
@@ -150,8 +143,6 @@ def read_json(path):
 
 
 def safe_torch_load(path, map_location="cpu"):
-    if torch is None:
-        raise RuntimeError("torch is required")
     try:
         return torch.load(str(path), map_location=map_location, weights_only=False)
     except TypeError:
@@ -159,8 +150,6 @@ def safe_torch_load(path, map_location="cpu"):
 
 
 def choose_device(device_arg):
-    if torch is None:
-        raise RuntimeError("torch is required")
     value = str(device_arg).strip().lower()
     if value == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -197,8 +186,6 @@ def load_case_bundle_and_write(args, case_input_root):
 
 
 def load_optional_npz(path):
-    if np is None:
-        raise RuntimeError("numpy is required")
     with np.load(path, allow_pickle=True) as z:
         return {key: z[key] for key in z.files}
 
@@ -1411,10 +1398,6 @@ def build_bundle_index_html(patient_id, case_input_rel, report_rel):
 
 def main(argv=None, **overrides):
     args = apply_overrides(parse_args(argv), overrides)
-    if np is None:
-        raise SystemExit("numpy is required")
-    if torch is None:
-        raise SystemExit("torch is required")
 
     patient_id = normalize_text(args.patient_id)
     if not patient_id:

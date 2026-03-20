@@ -3,10 +3,7 @@ import csv
 import json
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
+import numpy as np
 
 PRIMARY_SERIES_MATRIX = Path("output/clean_data/GSE103584_series_matrix.txt")
 FALLBACK_SERIES_MATRIX = Path("data/GSE103584_series_matrix.txt")
@@ -18,13 +15,6 @@ PRIMARY_MANIFEST = Path("output/patient_manifest.csv")
 FALLBACK_MANIFEST = Path("output/clean_data/patient_manifest.csv")
 
 DEFAULT_OUTPUT_ROOT = Path("output/stage7/7.1_rna_alignment")
-
-def check_dependencies():
-
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    return missing
 
 def resolve_input_path(primary_path, fallback_path):
 
@@ -269,14 +259,6 @@ def parse_args():
 def main():
 
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy"
-        )
-
     if args.max_patients < 0:
         raise SystemExit("--max-patients must be >= 0 (0 means all patients)")
 

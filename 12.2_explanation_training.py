@@ -4,25 +4,10 @@ import json
 import random
 from pathlib import Path
 
-try:
-    import numpy as np
-except Exception:
-    np = None
-
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-except Exception:
-    torch = None
-    nn = None
-    F = None
-
-if nn is None:
-    class _NNPlaceholder:
-        Module = object
-
-    nn = _NNPlaceholder()
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def resolve_root():
@@ -47,14 +32,6 @@ def load_local_module(path, module_name):
 
 PRIMARY_MOD = load_local_module(ROOT / "12.1_primary_outputs.py", "stage12_primary_outputs")
 
-
-def check_dependencies():
-    missing = []
-    if np is None:
-        missing.append("numpy")
-    if torch is None or nn is None or F is None:
-        missing.append("torch")
-    return missing
 
 
 def set_seed(seed):
@@ -912,13 +889,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    missing = check_dependencies()
-    if missing:
-        raise SystemExit(
-            "missing dependency: "
-            + ",".join(missing)
-            + ". install example: .venv/bin/pip install numpy torch"
-        )
     if args.num_time_bins <= 0:
         raise SystemExit("--num-time-bins must be > 0")
     if args.epochs <= 0:

@@ -332,7 +332,7 @@ These include:
 
 Main documentation files:
 - `README.md`
-- `1. REPORT.md`
+- `Eyes_On_Me_Not_The_Code_Plz.md`
 - `project.md`
 
 Main figure assets already created:
